@@ -404,7 +404,7 @@ function SkynetRPG() {
   }, [toast_]);
 
   // ── 자동 저장 (player/scenario/stageIdx 바뀔 때마다) ──
-  React.React.useEffect(() => {
+  React.useEffect(() => {
     if (!player || !scenario) return;
     LocalSave.save({
       player,
