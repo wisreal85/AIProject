@@ -601,14 +601,17 @@ function SkynetRPG() {
         if(["s2a_boss","s2b_boss","s2c_boss"].includes(st.id)){
           try{
             const exists=await DB.get(K.sc3);
-            if(!exists){
+            const generating=await DB.get("sn7:sc3gen");
+            if(!exists && !generating){
+              await DB.set("sn7:sc3gen", true);
               await broadcast("⚙️ 시나리오 3 생성 중...");
               const raw=await callAI(`스카이넷 RPG 시나리오3 설계. JSON만:{"name":"시나리오 3: 제목","desc":"1문장","stages":[{"id":"s3_1","name":"이름","story":"2문장","sky":"1문장","hint":"1문장","isBoss":false,"mon":[{"name":"이름","hp":80,"atk":14,"def":6,"reward":{"exp":60,"gold":30}}]},{"id":"s3_2","name":"이름","story":"2문장","sky":"1문장","hint":"1문장","isBoss":false,"mon":[{"name":"이름","hp":100,"atk":17,"def":8,"reward":{"exp":80,"gold":40}}]},{"id":"s3_boss","name":"보스명","story":"2문장","sky":"1문장","hint":"1문장","isBoss":true,"mon":[{"name":"이름","hp":180,"atk":22,"def":12,"reward":{"exp":180,"gold":90},"boss":true}]}]}`);
               const sc3=JSON.parse(raw.replace(/```json|```/g,"").trim());
               sc3.id=3; await DB.set(K.sc3,sc3); setSc3ready(true);
+              await DB.set("sn7:sc3gen", false);
               await broadcast(`🌍 시나리오 3 생성 완료: "${sc3.name}"`);
             }
-          }catch(_){ try{await broadcast("⚠️ SC3 생성 오류.");}catch(_){} }
+          }catch(_){ await DB.set("sn7:sc3gen", false); try{await broadcast("⚠️ SC3 생성 오류.");}catch(_){} }
         }
         if(st.id==="s3_boss"){
           try{
