@@ -8,35 +8,36 @@ export default async function handler(req, res) {
 
   try {
     const { prompt, system } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
 
-    if (!process.env.ANTHROPIC_API_KEY) {
-      console.error("ANTHROPIC_API_KEY not set");
+    if (!apiKey) {
+      console.error("GEMINI_API_KEY not set");
       return res.status(500).json({ error: "API key not configured" });
     }
 
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 900,
-        system: system || "한국어 게임 설계 AI. JSON만 출력.",
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
+    const fullPrompt = system ? `${system}\n\n${prompt}` : prompt;
+
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: fullPrompt }] }],
+          generationConfig: { maxOutputTokens: 900, temperature: 0.7 },
+        }),
+      }
+    );
 
     const data = await r.json();
 
     if (data.error) {
-      console.error("Anthropic error:", data.error.type, data.error.message);
+      console.error("Gemini error:", data.error.message);
       return res.status(200).json({ text: "", error: data.error.message });
     }
 
-    const text = data.content?.[0]?.text || "";
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    console.log("Gemini response length:", text.length);
     res.status(200).json({ text });
 
   } catch (e) {
