@@ -8,6 +8,12 @@ export default async function handler(req, res) {
 
   try {
     const { prompt, system } = req.body;
+
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error("ANTHROPIC_API_KEY not set");
+      return res.status(500).json({ error: "API key not configured" });
+    }
+
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -22,9 +28,19 @@ export default async function handler(req, res) {
         messages: [{ role: "user", content: prompt }],
       }),
     });
+
     const data = await r.json();
-    res.status(200).json({ text: data.content?.[0]?.text || "" });
+
+    if (data.error) {
+      console.error("Anthropic error:", data.error.type, data.error.message);
+      return res.status(200).json({ text: "", error: data.error.message });
+    }
+
+    const text = data.content?.[0]?.text || "";
+    res.status(200).json({ text });
+
   } catch (e) {
+    console.error("Handler error:", e.message);
     res.status(500).json({ error: e.message });
   }
 }
