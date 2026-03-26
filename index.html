@@ -63,6 +63,20 @@ const DB = {
 };
 const K = { choices:"sn7:ch", progress:"sn7:pg", sc3:"sn7:sc3", sc4:"sn7:sc4", notifs:"sn7:nt", feed:"sn7:fd" };
 
+// ── 로컬 저장 (캐릭터 진행 상황) ─────────────────
+const SAVE_KEY = "skynet_save_v7";
+const LocalSave = {
+  save(data) {
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch(_) {}
+  },
+  load() {
+    try { const d = localStorage.getItem(SAVE_KEY); return d ? JSON.parse(d) : null; } catch(_) { return null; }
+  },
+  clear() {
+    try { localStorage.removeItem(SAVE_KEY); } catch(_) {}
+  },
+};
+
 // ── Anthropic API ───────────────────────────────
 async function callAI(prompt, sys = "한국어 게임 설계 AI. JSON만 출력.") {
   try {
@@ -290,13 +304,16 @@ const PLOG = [
 // MAIN COMPONENT
 // ════════════════════════════════════════════════
 function SkynetRPG() {
-  const [phase, setPhase]       = React.useState("title");
+  // 저장된 세이브 불러오기
+  const _save = LocalSave.load();
+
+  const [phase, setPhase]       = React.useState(_save ? "map" : "title");
   // phases: title | prologue | opening | class_select | map | hurdle_map | stage | choice | boss_result | panel
 
-  const [player, setPlayer]     = React.useState(null);
-  const [comp, setComp]         = React.useState(null);     // 동료
-  const [scenario, setScenario] = React.useState(null);     // 현재 시나리오
-  const [stageIdx, setStageIdx] = React.useState(0);
+  const [player, setPlayer]     = React.useState(_save?.player || null);
+  const [comp, setComp]         = React.useState(_save?.comp || null);     // 동료
+  const [scenario, setScenario] = React.useState(_save?.scenario || null); // 현재 시나리오
+  const [stageIdx, setStageIdx] = React.useState(_save?.stageIdx || 0);
   const [battle, setBattle]     = React.useState(null);
   const [battleLog, setBLog]    = React.useState([]);
   const [busy, setBusy]         = React.useState(false);
@@ -309,10 +326,10 @@ function SkynetRPG() {
   // 허들
   const [curHurdle, setCurHurdle] = React.useState(null);
   const [hWaveIdx, setHWaveIdx]   = React.useState(0);
-  const [hRuns, setHRuns]         = React.useState({});     // {id: count}
+  const [hRuns, setHRuns]         = React.useState(_save?.hRuns || {});     // {id: count}
 
   // 선택지
-  const [openingBonus, setOpeningBonus] = React.useState(null);
+  const [openingBonus, setOpeningBonus] = React.useState(_save?.openingBonus || null);
   const [selCls, setSelCls]             = React.useState(null);
   const [inGameChoice, setInGameChoice] = React.useState(null);
 
@@ -385,6 +402,19 @@ function SkynetRPG() {
     }, 6000);
     return () => clearInterval(pollTimer.current);
   }, [toast_]);
+
+  // ── 자동 저장 (player/scenario/stageIdx 바뀔 때마다) ──
+  React.React.useEffect(() => {
+    if (!player || !scenario) return;
+    LocalSave.save({
+      player,
+      comp,
+      scenario,
+      stageIdx,
+      openingBonus,
+      hRuns,
+    });
+  }, [player, scenario, stageIdx, openingBonus, hRuns]);
 
   // ── 프롤로그 ──
   const skipPrologue = React.useCallback(() => {
@@ -811,11 +841,25 @@ function SkynetRPG() {
                 ))}
               </div>
             )}
-            <button onClick={()=>setPhase("prologue")}
+            {LocalSave.load() && (
+              <button onClick={()=>{
+                const s=LocalSave.load();
+                setPlayer(s.player); setComp(s.comp);
+                setScenario(s.scenario); setStageIdx(s.stageIdx);
+                setOpeningBonus(s.openingBonus); setHRuns(s.hRuns||{});
+                setPhase("map");
+              }}
+                style={{background:"#00ff8822",border:"1px solid #00ff88",color:"#00ff88",padding:"12px 36px",cursor:"pointer",fontSize:14,letterSpacing:3,borderRadius:4,display:"block",margin:"0 auto 12px",fontWeight:"bold"}}
+                onMouseEnter={e=>{e.currentTarget.style.background="#00ff8844"}}
+                onMouseLeave={e=>e.currentTarget.style.background="#00ff8822"}>
+                ▶ 이어하기 ({LocalSave.load()?.player?.name} / Lv.{LocalSave.load()?.player?.level})
+              </button>
+            )}
+            <button onClick={()=>{ LocalSave.clear(); setPhase("prologue"); }}
               style={{background:"transparent",border:"1px solid #00ff88",color:"#00ff88",padding:"12px 36px",cursor:"pointer",fontSize:14,letterSpacing:3,borderRadius:4,display:"block",margin:"0 auto 12px"}}
               onMouseEnter={e=>{e.currentTarget.style.background="#00ff8811";e.currentTarget.style.boxShadow="0 0 20px #00ff8844"}}
               onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.boxShadow="none"}}>
-              ▶ 게임 시작
+              ▶ 새 게임
             </button>
             {(sc3ready||sc4ready)&&(
               <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
