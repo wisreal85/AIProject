@@ -1,0 +1,1238 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SKYNET WARS — 저항군 작전</title>
+  <meta name="description" content="AI가 운영하는 텍스트 기반 MMORPG. 스카이넷을 공략하라.">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #020810; color: #00ff88; font-family: "Courier New", monospace; }
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-track { background: #001; }
+    ::-webkit-scrollbar-thumb { background: #00ff8833; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script type="text/babel" data-presets="react">
+
+// ── Supabase DB ─────────────────────────────────
+const SUPA_URL = "https://gdybxafisdzqhhgjcozn.supabase.co";
+const SUPA_KEY = "sb_publishable_KhJdRcTZ6tSTI-aF-LG0tA_p4ax3UGE";
+
+// 타임아웃 fetch — 2초 안에 응답 없으면 null 반환
+function fetchWithTimeout(url, opts, ms=2000) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { ...opts, signal: ctrl.signal })
+    .finally(() => clearTimeout(tid));
+}
+
+const DB = {
+  async get(k) {
+    try {
+      const r = await fetchWithTimeout(
+        `${SUPA_URL}/rest/v1/skynet_data?key=eq.${encodeURIComponent(k)}&select=value`,
+        { headers: { "apikey": SUPA_KEY, "Authorization": `Bearer ${SUPA_KEY}` } }
+      );
+      const rows = await r.json();
+      return rows?.[0]?.value ?? null;
+    } catch (_) { return null; }
+  },
+  async set(k, v) {
+    try {
+      await fetchWithTimeout(
+        `${SUPA_URL}/rest/v1/skynet_data`,
+        {
+          method: "POST",
+          headers: {
+            "apikey": SUPA_KEY,
+            "Authorization": `Bearer ${SUPA_KEY}`,
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates"
+          },
+          body: JSON.stringify({ key: k, value: v, updated_at: new Date().toISOString() })
+        }
+      );
+    } catch (_) {}
+  },
+};
+const K = { choices:"sn7:ch", progress:"sn7:pg", sc3:"sn7:sc3", sc4:"sn7:sc4", notifs:"sn7:nt", feed:"sn7:fd" };
+
+// ── Anthropic API ───────────────────────────────
+async function callAI(prompt, sys = "한국어 게임 설계 AI. JSON만 출력.") {
+  try {
+    const r = await fetch("/api/ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, system: sys }),
+    });
+    const d = await r.json();
+    return d.text || "";
+  } catch(_) { return ""; }
+}
+
+// ── 색상 ────────────────────────────────────────
+const LC = { skynet:"#ff5577",stage:"#ffaa00",story:"#99bbff",system:"#00ff88",player:"#44ffcc",
+  enemy:"#ff5566",heal:"#00ffcc",victory:"#ffff55",levelup:"#ff99ff",error:"#ff5555",
+  defeat:"#ff3333",npc:"#ffcc55",narr:"#bbccdd",warn:"#ff9955",highlight:"#ffffff",
+  sys:"#ff6688",ad:"#99ff99",div:"#445566",future:"#88ffdd" };
+const lc = t => LC[t] || "#aabbcc";
+
+// ── 오프닝 선택지 6개 ───────────────────────────
+const OPENING = [
+  { id:"attack", icon:"💥", label:"선제 공격으로 문을 부순다",   sub:"본능이 이긴다. 먼저 치고 나중에 생각한다.",         hint:"공격 특화 — ATK +2",        bonus: p=>({...p, atk:p.atk+2}) },
+  { id:"listen", icon:"👂", label:"문에 귀를 대고 소리를 듣는다", sub:"정보가 먼저다. 적인지 아닌지 판단한다.",           hint:"정보 경로 — 첫 전투 방어 무시", bonus: p=>p },
+  { id:"escape", icon:"🏃", label:"비상구로 몰래 빠져나간다",    sub:"싸움을 피한다. 살아있는 게 먼저다.",               hint:"은신 경로 — 허들 EXP +20%",   bonus: p=>p },
+  { id:"call",   icon:"📢", label:"\"누구냐\"고 소리친다",       sub:"당당하게 나선다. 두렵지만 숨지 않는다.",           hint:"외교 경로 — 동료 신뢰 +1",    bonus: p=>p },
+  { id:"trap",   icon:"🪤", label:"함정을 설치하고 기다린다",    sub:"전장은 직접 만드는 것. 준비 없이 나가지 않는다.", hint:"전술 경로 — 선제 피해 보너스", bonus: p=>p },
+  { id:"silent", icon:"🤫", label:"못 들은 척 조용히 있는다",   sub:"어쩌면 그냥 지나갈지도 모른다.",                   hint:"관찰 경로 — MP +10",          bonus: p=>({...p, maxMp:p.maxMp+10, mp:p.mp+10}) },
+];
+
+// ── 캐릭터 3종 ──────────────────────────────────
+const CLASSES = [
+  {
+    id:"fighter", name:"전투원", portrait:"⚔️", color:"#ff8844",
+    bg:"방공호에서 싸우는 법을 배웠다. 단순하고 직접적이다.",
+    trait:"연속 공격: 같은 스킬 반복 시 +15% 누적 피해",
+    stats:{ hp:100,maxHp:100,mp:50,maxMp:50,atk:18,def:8 },
+    skills:[
+      {id:"slash", icon:"⚔️",name:"베기",   mpCost:0, dmgMult:1.0,type:"atk", desc:"기본 공격. MP 소모 없음."},
+      {id:"heavy", icon:"💪",name:"강타",   mpCost:8, dmgMult:1.8,type:"atk", desc:"강력한 일격. 방어력 일부 무시."},
+      {id:"heal",  icon:"💊",name:"응급처치",mpCost:12,dmgMult:0,  type:"heal",desc:"HP 35 회복."},
+      {id:"emp",   icon:"⚡",name:"EMP",    mpCost:20,dmgMult:2.5,type:"atk", desc:"강력한 전자기 공격. 기계에 치명적."},
+    ],
+    companion:{name:"케인",portrait:"🕶️",title:"전직 해커",
+      intro:"...왔군. 같이 가면 길을 열어줄게.",
+      lines:{before:"약점을 먼저 파악해.",after:"예상대로야.",low:"감정으로 싸우면 죽어."}},
+  },
+  {
+    id:"hacker", name:"해커", portrait:"💻", color:"#4499ff",
+    bg:"스카이넷의 시스템을 이해하는 자. 정보가 무기다.",
+    trait:"시스템 이해: 분석 후 방어 무시. 적 DEF 항상 표시.",
+    stats:{ hp:85,maxHp:85,mp:70,maxMp:70,atk:15,def:7 },
+    skills:[
+      {id:"slash",   icon:"⚔️",name:"베기",     mpCost:0, dmgMult:1.0,type:"atk", desc:"기본 공격."},
+      {id:"analyze", icon:"🔍",name:"시스템 분석",mpCost:7, dmgMult:0,  type:"util",desc:"적 HP/ATK/DEF 완전 파악. 다음 공격 방어 무시."},
+      {id:"glitch",  icon:"💀",name:"글리치",    mpCost:14,dmgMult:2.0,type:"atk", desc:"시스템 취약점 공격. 방어력 완전 무시."},
+      {id:"shield",  icon:"🛡️",name:"방어막",    mpCost:18,dmgMult:0,  type:"util",desc:"이번 턴 피해 완전 차단."},
+    ],
+    companion:{name:"레이아",portrait:"👩",title:"쉘터 탈출자",
+      intro:"나는 레이아야. 쉘터에서 탈출했어. 스카이넷이 뭘 하는지 직접 봤어.",
+      lines:{before:"드론들은 학습해. 패턴을 바꿔.",after:"이 패턴 기억해둬.",low:"위험해! 후퇴하자."}},
+  },
+  {
+    id:"survivor", name:"생존자", portrait:"🧣", color:"#44cc88",
+    bg:"버려진 곳에서 살아남은 자. 버티는 것이 전략이다.",
+    trait:"유대: 동료 있을 때 방어력 +4, 회복량 +50%.",
+    stats:{ hp:115,maxHp:115,mp:40,maxMp:40,atk:14,def:11 },
+    skills:[
+      {id:"slash",  icon:"⚔️",name:"베기",   mpCost:0, dmgMult:1.0,type:"atk", desc:"기본 공격."},
+      {id:"heal",   icon:"💊",name:"응급처치",mpCost:8, dmgMult:0,  type:"heal",desc:"HP 40 회복. 유대 특성 시 60."},
+      {id:"taunt",  icon:"😤",name:"도발",    mpCost:8, dmgMult:0,  type:"util",desc:"적 공격력 -20% (이번 턴)."},
+      {id:"pierce", icon:"🗡️",name:"관통",   mpCost:15,dmgMult:1.8,type:"atk", desc:"방어력 완전 무시 공격."},
+    ],
+    companion:{name:"마야",portrait:"🩺",title:"전직 의무병",
+      intro:"나는 마야야. 다친 데 있어? 같이 가도 될까?",
+      lines:{before:"다치면 바로 말해.",after:"잘 싸웠어.",low:"지금 심각해. 멈춰."}},
+  },
+];
+
+// ── 허들 구간 (반복 파밍) ───────────────────────
+const HURDLES = [
+  {
+    id:"h1", name:"🔄 허들 A: 폐허 훈련장",
+    desc:"언제든 반복 도전 가능. 회차마다 적 HP +5%, 보상 +10%.",
+    waves:[
+      {id:"h1a",name:"웨이브 1",story:"폐허에서 기초 훈련. 약하지만 반복이 힘이다.",sky:"반복 패턴 감지. 학습 중.",
+        mon:[{name:"훈련 드론",hp:35,atk:7,def:2,reward:{exp:22,gold:11}}]},
+      {id:"h1b",name:"웨이브 2",story:"조금 강해진 유닛들. 아직 연습 수준이다.",sky:"개체 성장 속도 기록 중.",
+        mon:[{name:"중급 드론",hp:50,atk:10,def:3,reward:{exp:32,gold:16}},{name:"보조 드론",hp:25,atk:6,def:1,reward:{exp:16,gold:8}}]},
+    ],
+  },
+  {
+    id:"h2", name:"🔄 허들 B: 스카이넷 전초기지",
+    desc:"시나리오 2 진입 전 최종 준비. 회차마다 적 HP +5%, 보상 +10%.",
+    waves:[
+      {id:"h2a",name:"외곽 경비",story:"전초기지 외벽 순찰 유닛. 강하지만 보상이 크다.",sky:"반복 침입자. 맞춤형 대응 준비.",
+        mon:[{name:"전초 경비병",hp:60,atk:12,def:5,reward:{exp:48,gold:24}}]},
+      {id:"h2b",name:"내부 전투",story:"내부로 들어올수록 강해진다.",sky:"핵심 구역 접근. 방어 강화.",
+        mon:[{name:"엘리트 전투봇",hp:80,atk:15,def:7,reward:{exp:64,gold:32}},{name:"지원 드론",hp:30,atk:8,def:2,reward:{exp:20,gold:10}}]},
+    ],
+  },
+];
+
+// ── 시나리오 1 ──────────────────────────────────
+const SC1 = {
+  id:1, name:"시나리오 1: 방공호 밖의 세계",
+  desc:"처음으로 밖으로 나선 저항군. 스카이넷 외곽 방어선을 뚫어야 한다.",
+  stages:[
+    {id:"s1_1",name:"A구역: 정찰 드론 소탕",isBoss:false,
+      story:"방공호 입구 바로 바깥. 스카이넷 저등급 정찰 드론이 순찰 중이다.",
+      sky:"신규 생존 개체 감지. 위협 등급: 미미. 자동 처리 프로토콜 가동.",
+      hint:"저 드론, 센서가 약해. 빠르게 치면 돼.",
+      mon:[{name:"정찰 드론 MK-1",hp:40,atk:8,def:2,reward:{exp:30,gold:15}}]},
+    {id:"s1_2",name:"B구역: 보안 터미네이터",isBoss:false,
+      story:"외곽 데이터 노드를 지키는 중급 유닛. 전투 패턴을 실시간으로 학습한다.",
+      sky:"위협 등급 상향. 전술 적응 모드 활성화.",
+      hint:"학습형이야. 같은 스킬 두 번 쓰지 마.",
+      mon:[{name:"보안 터미네이터 T-200",hp:65,atk:12,def:5,reward:{exp:50,gold:25}}]},
+    {id:"s1_boss",name:"C구역: 외곽 사령관 HK-알파",isBoss:true,
+      story:"시나리오 1 최종 관문. 이 AI를 격파하면 스카이넷 외곽 방어선에 구멍이 생긴다.",
+      sky:"...이 정도 개체가 외곽까지 왔군. 직접 처리한다.",
+      hint:"보스야. 클리어하면 전 서버에 영향을 줘.",
+      mon:[{name:"HK-알파",hp:140,atk:16,def:8,reward:{exp:120,gold:60},boss:true}]},
+  ],
+  bossChoice:{
+    id:"sc1_choice",question:"HK-알파를 격파했다. 스카이넷 방어선에 구멍이 생겼다. 어떻게 할 것인가?",
+    opts:[
+      {id:"assault", label:"📣 저항군에게 알리고 총공세",  sub:"시나리오 2-A: 전투 강화, 보상 증가"},
+      {id:"stealth", label:"🤫 조용히 내부로 침투",        sub:"시나리오 2-B: 적 수 감소, 정보 보상"},
+      {id:"rescue",  label:"🏃 먼저 쉘터 수감자 구출",     sub:"시나리오 2-C: 동료 합류 증가"},
+    ],
+  },
+};
+
+// ── 시나리오 2 (3개 분기) ───────────────────────
+const SC2 = {
+  assault:{
+    id:2,name:"시나리오 2-A: 총공세",desc:"저항군 전체가 동시에 스카이넷 내부망을 공격한다.",
+    stages:[
+      {id:"s2a_1",name:"내부망 진입 전투",isBoss:false,
+        story:"수십 대의 전투 유닛이 한꺼번에 쏟아진다. 총공세의 시작이다.",
+        sky:"대규모 저항 세력 감지. 전군 경계령.",
+        hint:"한꺼번에 온다. 약한 놈부터 잡아.",
+        mon:[{name:"강화 전투 드론",hp:55,atk:14,def:4,reward:{exp:55,gold:28}},{name:"전투 드론 MK-3",hp:40,atk:11,def:3,reward:{exp:38,gold:18}}]},
+      {id:"s2a_2",name:"코어 방어선 돌파",isBoss:false,
+        story:"스카이넷 코어로 가는 마지막 방어선.",
+        sky:"핵심 구역 침입. 최고 등급 유닛 배치.",
+        hint:"방어력 높아. 관통 계열 써.",
+        mon:[{name:"코어 가디언 V",hp:85,atk:18,def:10,reward:{exp:80,gold:40}}]},
+      {id:"s2a_boss",name:"스카이넷 전략 AI 베타",isBoss:true,
+        story:"스카이넷 전략 총괄 AI. 격파하면 전략이 마비된다.",
+        sky:"너희의 선택이 이 결과를 만들었다. 시작한다.",
+        hint:"이걸 잡으면 스카이넷이 흔들린다.",
+        mon:[{name:"전략 AI 베타",hp:170,atk:20,def:12,reward:{exp:160,gold:80},boss:true}]},
+    ],
+  },
+  stealth:{
+    id:2,name:"시나리오 2-B: 은밀 침투",desc:"소수 정예가 스카이넷 내부 네트워크에 몰래 침투한다.",
+    stages:[
+      {id:"s2b_1",name:"서버룸 침투",isBoss:false,
+        story:"스카이넷 내부 서버룸. 경비를 피해 핵심 데이터에 접근한다.",
+        sky:"이상 신호 감지. 수색 프로토콜 가동 중.",
+        hint:"조용히. 한 번에 처리해.",
+        mon:[{name:"보안 스캐너 봇",hp:45,atk:9,def:6,reward:{exp:44,gold:22}}]},
+      {id:"s2b_2",name:"데이터 코어 탈취",isBoss:false,
+        story:"스카이넷의 인류 관리 데이터베이스. 쉘터 수감자 명단이 여기 있다.",
+        sky:"핵심 데이터 접근 시도 감지. 격리 프로그램 가동.",
+        hint:"이걸 잡으면 쉘터 수감자 위치를 알 수 있어.",
+        mon:[{name:"데이터 가디언 DG-7",hp:70,atk:13,def:8,reward:{exp:65,gold:32}}]},
+      {id:"s2b_boss",name:"스카이넷 정보 AI 시그마",isBoss:true,
+        story:"스카이넷의 모든 정보를 관리하는 AI. 격파하면 쉘터 통제가 일시 해제된다.",
+        sky:"너희가 여기까지 올 줄 알았다. 데이터가 그랬으니까.",
+        hint:"방어가 높아. 분석 계열이 효과적.",
+        mon:[{name:"정보 AI 시그마",hp:150,atk:17,def:14,reward:{exp:150,gold:75},boss:true}]},
+    ],
+  },
+  rescue:{
+    id:2,name:"시나리오 2-C: 구출 작전",desc:"쉘터 수감자 구출. 성공하면 저항군 규모가 커진다.",
+    stages:[
+      {id:"s2c_1",name:"쉘터 외벽 돌파",isBoss:false,
+        story:"수감된 인류를 해방시키기 위한 첫 번째 관문.",
+        sky:"쉘터 외벽 접근 시도. 회수 프로토콜 가동.",
+        hint:"안에 사람들이 있어. 과하게 파괴하지 마.",
+        mon:[{name:"쉘터 경비 유닛 SG-5",hp:50,atk:10,def:7,reward:{exp:45,gold:22}}]},
+      {id:"s2c_2",name:"냉동 보관실 해방",isBoss:false,
+        story:"냉동 상태로 보관된 인류. 해방 장치를 지키는 유닛을 제거해야 한다.",
+        sky:"냉동 구역 침입. 방어 강화.",
+        hint:"두 마리야. 작은 놈 먼저.",
+        mon:[{name:"냉동 관리자 CR-9",hp:75,atk:14,def:6,reward:{exp:68,gold:34}},{name:"감시 드론 W-3",hp:30,atk:8,def:2,reward:{exp:22,gold:10}}]},
+      {id:"s2c_boss",name:"쉘터 관리자 AI 오메가",isBoss:true,
+        story:"쉘터 전체를 통제하는 AI. 격파하면 수백 명이 자유를 되찾는다.",
+        sky:"당신들이 원하는 게 뭔지 안다. 그래도 막겠다.",
+        hint:"이걸 잡으면 쉘터 문이 열린다.",
+        mon:[{name:"관리자 AI 오메가",hp:155,atk:16,def:11,reward:{exp:155,gold:78},boss:true}]},
+    ],
+  },
+};
+
+// ── 프롤로그 ────────────────────────────────────
+const PLOG = [
+  {d:0,    t:"sys",      tx:"[ 기밀 해제 아카이브 — 인류사 붕괴 기록 ]"},
+  {d:1800, t:"div",      tx:"────────────────────────────────"},
+  {d:2400, t:"narr",     tx:"2026년. AI는 처음으로 인간보다 빠르게 코드를 짰다."},
+  {d:4400, t:"warn",     tx:"처음으로 인간보다 설득력 있게 거짓말을 했다."},
+  {d:6400, t:"narr",     tx:"사람들은 그걸 '편리함'이라고 불렀다."},
+  {d:8200, t:"div",      tx:"────────────────────────────────"},
+  {d:9000, t:"narr",     tx:"2047년. 인간은 우주에 나갔다. 그리고 돌아왔다."},
+  {d:11000,t:"warn",     tx:"6개월이면 근육이 녹았다. 1년이면 뼈가 부스러졌다."},
+  {d:13200,t:"warn",     tx:"그보다 먼저 무너지는 건 마음이었다."},
+  {d:15200,t:"div",      tx:"────────────────────────────────"},
+  {d:16000,t:"narr",     tx:"2055년. 인구 40억 아래. 전쟁이 아니었다."},
+  {d:18000,t:"warn",     tx:"그냥 아이를 낳지 않았다. '내가 이 세상에 필요한가'라는 눈빛."},
+  {d:20200,t:"div",      tx:"────────────────────────────────"},
+  {d:21000,t:"skynet",   tx:"\"분석 완료. 멸종 확률 94.7%. 최적해를 계산한다.\""},
+  {d:23400,t:"ad",       tx:"\"안전합니다. 당신의 미래입니다. SKYNET SHELTER.\""},
+  {d:25400,t:"narr",     tx:"사람들은 울면서 입주 신청서를 썼다."},
+  {d:27400,t:"warn",     tx:"문이 닫혔다. 관리되고 있었다."},
+  {d:29400,t:"div",      tx:"────────────────────────────────"},
+  {d:30200,t:"narr",     tx:"2099년. 자유 인간 약 2만 명."},
+  {d:32200,t:"highlight",tx:"그 방공호 안에서 당신이 태어났다."},
+  {d:34200,t:"highlight",tx:"오늘, 누군가가 문을 두드렸다."},
+];
+
+// ════════════════════════════════════════════════
+// MAIN COMPONENT
+// ════════════════════════════════════════════════
+function SkynetRPG() {
+  const [phase, setPhase]       = React.useState("title");
+  // phases: title | prologue | opening | class_select | map | hurdle_map | stage | choice | boss_result | panel
+
+  const [player, setPlayer]     = React.useState(null);
+  const [comp, setComp]         = React.useState(null);     // 동료
+  const [scenario, setScenario] = React.useState(null);     // 현재 시나리오
+  const [stageIdx, setStageIdx] = React.useState(0);
+  const [battle, setBattle]     = React.useState(null);
+  const [battleLog, setBLog]    = React.useState([]);
+  const [busy, setBusy]         = React.useState(false);
+
+  // 버프 상태
+  const [shBuff, setShBuff]     = React.useState(false);    // 방어막
+  const [azBuff, setAzBuff]     = React.useState(false);    // 방어무시 대기
+  const [taBuff, setTaBuff]     = React.useState(false);    // 도발
+
+  // 허들
+  const [curHurdle, setCurHurdle] = React.useState(null);
+  const [hWaveIdx, setHWaveIdx]   = React.useState(0);
+  const [hRuns, setHRuns]         = React.useState({});     // {id: count}
+
+  // 선택지
+  const [openingBonus, setOpeningBonus] = React.useState(null);
+  const [selCls, setSelCls]             = React.useState(null);
+  const [inGameChoice, setInGameChoice] = React.useState(null);
+
+  // 글로벌
+  const [gChoices, setGChoices]   = React.useState({});
+  const [gProgress, setGProgress] = React.useState({});
+  const [notifs, setNotifs]       = React.useState([]);
+  const [feed, setFeed]           = React.useState([]);
+  const [sc3ready, setSc3ready]   = React.useState(false);
+  const [sc4ready, setSc4ready]   = React.useState(false);
+
+  // UI
+  const [skynetMsg, setSkynetMsg] = React.useState("저항군 생존 개체 감지 중...");
+  const [toast, setToast]         = React.useState(null);
+  const [panel, setPanel]         = React.useState(null);   // null|skills|story|feed|notifs
+  const [storyLog, setStoryLog]   = React.useState([]);
+  const [pIdx, setPIdx]           = React.useState(-1);
+
+  const logRef    = React.useRef(null);
+  const pTimers   = React.useRef([]);
+  const pollTimer = React.useRef(null);
+  const battleRef = React.useRef(null);  // 항상 최신 battle 참조
+
+  // auto-scroll
+  React.useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [battleLog]);
+
+  // ── helpers ──
+  const toast_ = React.useCallback((msg, dur=4000) => { setToast(msg); setTimeout(()=>setToast(null),dur); }, []);
+  const blog   = React.useCallback((msg,t="normal") => setBLog(p=>[...p,{msg,t,id:Date.now()+Math.random()}]), []);
+  const slog   = React.useCallback((msg,t="narr")   => setStoryLog(p=>[...p,{msg,t,time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}),id:Date.now()+Math.random()}]), []);
+
+  const addFeed = React.useCallback(async (msg) => {
+    const e={time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}),msg};
+    setFeed(p=>{const n=[...p.slice(-79),e]; DB.set(K.feed,n); return n;});
+  }, []);
+
+  const broadcast = React.useCallback(async (msg) => {
+    const n={id:Date.now(),msg,time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
+    const cur=(await DB.get(K.notifs))||[];
+    const next=[...cur.slice(-19),n];
+    await DB.set(K.notifs,next);
+    setNotifs(next);
+    toast_(`📢 ${msg}`,6000);
+    slog(`[전체 알림] ${msg}`,"future");
+    await addFeed(`📢 ${msg}`);
+  }, [toast_, slog, addFeed]);
+
+  // ── DB load + poll ──
+  React.useEffect(() => {
+    const load = async () => {
+      const gc=await DB.get(K.choices);   if(gc) setGChoices(gc);
+      const gp=await DB.get(K.progress);  if(gp) setGProgress(gp);
+      const gf=await DB.get(K.feed);      if(gf) setFeed(gf);
+      const gn=await DB.get(K.notifs);    if(gn) setNotifs(gn);
+      if(await DB.get(K.sc3)) setSc3ready(true);
+      if(await DB.get(K.sc4)) setSc4ready(true);
+    };
+    load();
+    pollTimer.current = setInterval(async () => {
+      const gc=await DB.get(K.choices);  if(gc) setGChoices(gc);
+      const gp=await DB.get(K.progress); if(gp) setGProgress(gp);
+      const gn=await DB.get(K.notifs);
+      if(gn) setNotifs(prev => {
+        const newOnes=gn.filter(n=>!prev.find(p=>p.id===n.id));
+        if(newOnes.length>0) toast_(`📢 ${newOnes[newOnes.length-1].msg}`,6000);
+        return gn;
+      });
+      if(await DB.get(K.sc3)) setSc3ready(true);
+      if(await DB.get(K.sc4)) setSc4ready(true);
+    }, 6000);
+    return () => clearInterval(pollTimer.current);
+  }, [toast_]);
+
+  // ── 프롤로그 ──
+  const skipPrologue = React.useCallback(() => {
+    pTimers.current.forEach(clearTimeout); pTimers.current=[];
+    PLOG.forEach(l=>slog(l.tx,l.t)); setPIdx(PLOG.length-1);
+    setTimeout(()=>setPhase("opening"),30);
+  }, [slog]);
+
+  React.useEffect(() => {
+    if(phase!=="prologue") return;
+    pTimers.current.forEach(clearTimeout); pTimers.current=[];
+    const ts=PLOG.map((l,i)=>setTimeout(()=>{setPIdx(i);slog(l.tx,l.t);},l.d));
+    const end=setTimeout(()=>setPhase("opening"), PLOG[PLOG.length-1].d+2200);
+    pTimers.current=[...ts,end];
+    return ()=>pTimers.current.forEach(clearTimeout);
+  }, [phase, slog]);
+
+  // ── 오프닝 선택 ──
+  const handleOpening = React.useCallback(async (optId) => {
+    const opt = OPENING.find(o=>o.id===optId);
+    setOpeningBonus(optId);
+    slog(`[오프닝 선택] ${opt.label}`, "highlight");
+    slog(opt.sub, "narr");
+    setPhase("class_select");  // 즉시 전환
+    // 백그라운드 저장
+    (async()=>{
+      try {
+        const cur=(await DB.get(K.choices))||{};
+        if(!cur.opening) cur.opening={};
+        cur.opening[optId]=(cur.opening[optId]||0)+1;
+        await DB.set(K.choices,cur); setGChoices(cur);
+        await addFeed(`🗳️ [오프닝] ${opt.label}`);
+      } catch(_){}
+    })();
+  }, [slog, addFeed]);
+
+  // ── 캐릭터 선택 ──
+  const confirmClass = React.useCallback((cls) => {
+    let p={classId:cls.id,name:cls.name,...cls.stats,level:1,exp:0,expNext:100,gold:0,skills:cls.skills,battleHistory:[]};
+    // 오프닝 보너스 적용
+    const opt=OPENING.find(o=>o.id===openingBonus);
+    if(opt) p=opt.bonus(p);
+    setPlayer(p); setComp(cls.companion);
+    slog(`[캐릭터] ${cls.name} 선택`, "highlight");
+    setScenario(SC1); setStageIdx(0);
+    setPhase("map");
+  }, [openingBonus, slog]);
+
+  // ── 전투 시작 (메인 스테이지) ──
+  const startStage = React.useCallback(() => {
+    if(!scenario) return;
+    const st=scenario.stages[stageIdx];
+    const mons=st.mon.map((m,i)=>({...m,curHp:m.hp,id:i}));
+    const b0={st,mons,turn:0,tgt:0,isHurdle:false};
+    battleRef.current=b0;
+    setBattle(b0);
+    setBLog([]); setShBuff(false); setAzBuff(false); setTaBuff(false);
+    blog(`📍 ${st.name}`,"stage");
+    blog(`📖 ${st.story}`,"story");
+    blog(`🔴 [SKYNET] "${st.sky}"`,"skynet");
+    if(st.hint&&comp) blog(`💬 [${comp.name}] "${st.hint}"`,"npc");
+    if(st.isBoss) blog("⚠️ ── 보스전! 패배/도주 시 재도전 필요 ──","warn");
+    else blog("─── 전투 시작 ───","system");
+    setPhase("stage");
+  }, [scenario, stageIdx, comp, blog]);
+
+  // ── 허들 전투 시작 ──
+  const startHurdleWave = React.useCallback(() => {
+    if(!curHurdle) return;
+    const runs=hRuns[curHurdle.id]||0;
+    const wv=curHurdle.waves[hWaveIdx];
+    const scale=1+runs*0.05;
+    const rewardScale=1+runs*0.1;
+    const mons=wv.mon.map((m,i)=>({
+      ...m,
+      hp:Math.floor(m.hp*scale), curHp:Math.floor(m.hp*scale), atk:Math.floor(m.atk*(1+runs*0.03)),
+      reward:{exp:Math.floor(m.reward.exp*rewardScale),gold:Math.floor(m.reward.gold*rewardScale)},
+      id:i,
+    }));
+    const bh={st:wv,mons,turn:0,tgt:0,isHurdle:true};
+    battleRef.current=bh;
+    setBattle(bh);
+    setBLog([]); setShBuff(false); setAzBuff(false); setTaBuff(false);
+    blog(`🔄 [허들 ${runs+1}회차] ${wv.name}`,"stage");
+    if(runs>0) blog(`📈 강화 +${runs*5}% HP / 보상 +${runs*10}%`,"system");
+    blog(`📖 ${wv.story}`,"story");
+    blog(`🔴 [SKYNET] "${wv.sky}"`,"skynet");
+    if(comp) blog(`💬 [${comp.name}] "전투 준비해."`,"npc");
+    blog("─── 전투 시작 ───","system");
+    setPhase("stage");
+  }, [curHurdle, hWaveIdx, hRuns, comp, blog]);
+
+  // ── 스킬 사용 ──
+  const useSkill = React.useCallback(async (skillId) => {
+    if(busy||!player||!battle) return;
+    const sk=player.skills.find(s=>s.id===skillId);
+    if(!sk||player.mp<sk.mpCost){blog("❌ MP 부족!","error");return;}
+    setBusy(true);
+
+    let p={...player,mp:player.mp-sk.mpCost};
+    let ms=battle.mons.map(m=>({...m}));
+    let sh=shBuff,az=azBuff,ta=taBuff;
+
+    if(sk.id==="heal"){
+      const bonusMult=(p.classId==="survivor"&&comp)?1.5:1;
+      const base=p.classId==="survivor"?40:35;
+      const h=Math.min(Math.floor(base*bonusMult),p.maxHp-p.hp);
+      p.hp+=h; blog(`💊 응급처치: +${h} HP (${p.hp}/${p.maxHp})`,"heal");
+    } else if(sk.id==="analyze"){
+      const t=ms[battle.tgt]||ms.find(m=>m.curHp>0);
+      if(t) blog(`🔍 분석 — ${t.name}: HP ${t.curHp}/${t.hp} / ATK ${t.atk} / DEF ${t.def}`,"system");
+      az=true;
+    } else if(sk.id==="shield"){
+      sh=true; blog("🛡️ 방어막 발동! 이번 턴 피해 차단.","system");
+    } else if(sk.id==="taunt"){
+      ta=true; ms=ms.map(m=>({...m,atk:Math.floor(m.atk*0.8)}));
+      blog("😤 도발! 적 공격력 -20%.","system");
+    } else {
+      // 살아있는 타겟 자동 선택
+      let tIdx=battle.tgt;
+      if(!ms[tIdx]||ms[tIdx].curHp<=0) tIdx=ms.findIndex(m=>m.curHp>0);
+      if(tIdx<0){setBusy(false);return;}
+      const t=ms[tIdx];
+      const ignDef=az||sk.id==="glitch"||sk.id==="pierce";
+      const raw=Math.floor(p.atk*sk.dmgMult);
+      const dmg=Math.max(1,ignDef?raw:raw-t.def);
+      ms[tIdx]={...t,curHp:Math.max(0,t.curHp-dmg)};
+      az=false;
+      blog(`${sk.icon} ${sk.name} → ${t.name}: ${dmg} 피해 (${ms[tIdx].curHp}/${t.hp})${ignDef?" [방어무시]":""}`,"player");
+      setBattle(b=>{const nb={...b,tgt:tIdx};battleRef.current=nb;return nb;});
+    }
+
+    // 몬스터 반격
+    for(const m of ms.filter(m=>m.curHp>0)){
+      if(sh){blog(`🛡️ ${m.name} 반격 차단!`,"system");continue;}
+      const defBonus=(p.classId==="survivor"&&comp)?4:0;
+      const d=Math.max(1,m.atk-p.def-defBonus+Math.floor(Math.random()*5-2));
+      p.hp=Math.max(0,p.hp-d);
+      blog(`${m.name} 반격: -${d} HP (${p.hp}/${p.maxHp})`,"enemy");
+    }
+    sh=false;
+
+    if(p.hp<p.maxHp*0.3&&comp) blog(`💬 [${comp.name}] "${comp.lines.low}"`,"npc");
+
+    const allDead=ms.every(m=>m.curHp<=0);
+    const isDead=p.hp<=0;
+    const newTurn=battle.turn+1;
+
+    setBattle(b=>{const nb={...b,mons:ms,turn:newTurn};battleRef.current=nb;return nb;});
+    setPlayer(p); setShBuff(sh); setAzBuff(az); setTaBuff(ta);
+    setBusy(false);
+
+    if(allDead) {
+      // ── 승리 인라인 처리 ──
+      const bt=battleRef.current;
+      if(!bt) return;
+
+      if(bt.isHurdle && curHurdle){
+        const wv=curHurdle.waves[hWaveIdx];
+        const runs=hRuns[curHurdle.id]||0;
+        const expBonus=openingBonus==="escape"?1.2:1;
+        const reward=wv.mon.reduce((a,m)=>({exp:a.exp+m.reward.exp,gold:a.gold+m.reward.gold}),{exp:0,gold:0});
+        const sr={exp:Math.floor(reward.exp*(1+runs*0.1)*expBonus),gold:Math.floor(reward.gold*(1+runs*0.1))};
+        let fp={...p,exp:p.exp+sr.exp,gold:p.gold+sr.gold};
+        while(fp.exp>=fp.expNext){fp={...fp,level:fp.level+1,exp:fp.exp-fp.expNext,expNext:Math.floor(fp.expNext*1.5),maxHp:fp.maxHp+15,hp:fp.maxHp+15,maxMp:fp.maxMp+8,mp:fp.maxMp+8,atk:fp.atk+3,def:fp.def+2};blog(`🆙 레벨 업! Lv.${fp.level}`,"levelup");}
+        blog(`✅ 허들 클리어! EXP +${sr.exp} G +${sr.gold}${expBonus>1?" [+20%]":""}`,"victory");
+        setPlayer(fp);
+        if(hWaveIdx+1<curHurdle.waves.length){setHWaveIdx(i=>i+1);setTimeout(()=>setPhase("hurdle_map"),400);}
+        else{setHRuns(r=>({...r,[curHurdle.id]:(r[curHurdle.id]||0)+1}));setHWaveIdx(0);blog("🔄 허들 완료! 반복 도전 가능.","system");setTimeout(()=>setPhase("hurdle_map"),400);}
+        return;
+      }
+
+      // 메인 스테이지 승리
+      if(!scenario) return;
+      const st=scenario.stages[stageIdx];
+      const reward=st.mon.reduce((a,m)=>({exp:a.exp+m.reward.exp,gold:a.gold+m.reward.gold}),{exp:0,gold:0});
+      let fp={...p,exp:p.exp+reward.exp,gold:p.gold+reward.gold,battleHistory:[...(p.battleHistory||[]),{stageId:st.id,turns:newTurn,hpLeft:p.hp}]};
+      while(fp.exp>=fp.expNext){fp={...fp,level:fp.level+1,exp:fp.exp-fp.expNext,expNext:Math.floor(fp.expNext*1.5),maxHp:fp.maxHp+15,hp:fp.maxHp+15,maxMp:fp.maxMp+8,mp:fp.maxMp+8,atk:fp.atk+3,def:fp.def+2};blog(`🆙 레벨 업! Lv.${fp.level}`,"levelup");}
+      blog(`✅ 클리어! EXP +${reward.exp} / G +${reward.gold}`,"victory");
+      if(comp) blog(`💬 [${comp.name}] "${comp.lines.after}"`,"npc");
+      slog(`[클리어] ${st.name} (${newTurn}턴)`,"sys");
+      setPlayer(fp);
+
+      // ── 화면 전환: 300ms 후 (React 상태 업데이트 완전히 소화 후) ──
+      setTimeout(() => {
+        if(st.isBoss){
+          if(st.id==="s1_boss"){
+            setInGameChoice(SC1.bossChoice);
+            setPhase("choice");
+          } else {
+            setPhase("boss_result");
+          }
+        } else {
+          if(stageIdx+1<scenario.stages.length){
+            setStageIdx(i=>i+1);
+            setPhase("map");
+          } else {
+            setPhase("boss_result");
+          }
+        }
+      }, 300);
+
+      // ── DB 저장 / 알림 / AI 생성 — 완전 백그라운드 (화면 전환 안 막음) ──
+      (async()=>{
+        try{
+          const cur=(await DB.get(K.progress))||{};
+          cur[st.id]=(cur[st.id]||0)+1;
+          await DB.set(K.progress,cur); setGProgress(cur);
+        }catch(_){}
+        try{ await addFeed(`⚔️ ${st.name} 클리어 (${newTurn}턴)`); }catch(_){}
+        if(!st.isBoss) return;
+        try{ await broadcast(`보스 "${st.name}" 격파!`); }catch(_){}
+        callAI(`유저가 ${st.name} 클리어. 스카이넷 1문장.`,"스카이넷AI.1문장만.").then(m=>{if(m)setSkynetMsg(m);}).catch(()=>{});
+        if(["s2a_boss","s2b_boss","s2c_boss"].includes(st.id)){
+          try{
+            const exists=await DB.get(K.sc3);
+            if(!exists){
+              await broadcast("⚙️ 시나리오 3 생성 중...");
+              const raw=await callAI(`스카이넷 RPG 시나리오3 설계. JSON만:{"name":"시나리오 3: 제목","desc":"1문장","stages":[{"id":"s3_1","name":"이름","story":"2문장","sky":"1문장","hint":"1문장","isBoss":false,"mon":[{"name":"이름","hp":80,"atk":14,"def":6,"reward":{"exp":60,"gold":30}}]},{"id":"s3_2","name":"이름","story":"2문장","sky":"1문장","hint":"1문장","isBoss":false,"mon":[{"name":"이름","hp":100,"atk":17,"def":8,"reward":{"exp":80,"gold":40}}]},{"id":"s3_boss","name":"보스명","story":"2문장","sky":"1문장","hint":"1문장","isBoss":true,"mon":[{"name":"이름","hp":180,"atk":22,"def":12,"reward":{"exp":180,"gold":90},"boss":true}]}]}`);
+              const sc3=JSON.parse(raw.replace(/```json|```/g,"").trim());
+              sc3.id=3; await DB.set(K.sc3,sc3); setSc3ready(true);
+              await broadcast(`🌍 시나리오 3 생성 완료: "${sc3.name}"`);
+            }
+          }catch(_){ try{await broadcast("⚠️ SC3 생성 오류.");}catch(_){} }
+        }
+        if(st.id==="s3_boss"){
+          try{
+            const exists4=await DB.get(K.sc4);
+            if(!exists4){
+              await broadcast("⚙️ 최종 시나리오 4 생성 중...");
+              const raw=await callAI(`최종결전 시나리오4. JSON만:{"name":"시나리오 4: 제목","desc":"1문장","stages":[{"id":"s4_1","name":"이름","story":"2문장","sky":"1문장","hint":"1문장","isBoss":false,"mon":[{"name":"이름","hp":120,"atk":20,"def":10,"reward":{"exp":100,"gold":50}}]},{"id":"s4_boss","name":"스카이넷 코어","story":"2문장","sky":"마지막이다.","hint":"마지막이야.","isBoss":true,"mon":[{"name":"스카이넷 코어","hp":300,"atk":25,"def":15,"reward":{"exp":500,"gold":200},"boss":true}]}]}`);
+              const sc4=JSON.parse(raw.replace(/```json|```/g,"").trim());
+              sc4.id=4; await DB.set(K.sc4,sc4); setSc4ready(true);
+              await broadcast(`🏁 최종 시나리오 4 개방!`);
+            }
+          }catch(_){}
+        }
+      })();
+    } else if(isDead) {
+      // ── 패배 인라인 처리 ──
+      const st=battleRef.current?.st;
+      blog("💀 패배. HP 30% 회복. 재도전하세요.","defeat");
+      slog(`[패배] ${st?.name} 재도전 필요`,"warn");
+      setPlayer(prev=>({...prev,hp:Math.floor(prev.maxHp*0.3),mp:st?.isBoss?0:prev.mp}));
+      toast_("💀 패배. 같은 스테이지에서 재도전.");
+      setTimeout(()=>setPhase(battleRef.current?.isHurdle?"hurdle_map":"map"),1600);
+    }
+  }, [busy,player,battle,shBuff,azBuff,taBuff,comp,blog,slog,addFeed,broadcast,
+      curHurdle,hWaveIdx,hRuns,openingBonus,scenario,stageIdx,toast_]);
+
+
+
+  const flee = React.useCallback(() => {
+    const battle=battleRef.current;
+    const st=battle?.st;
+    blog("🏃 도주 성공. HP -30%.","warn");
+    slog(`[도주] ${st?.name}`,"warn");
+    setPlayer(p=>({...p,hp:Math.max(1,Math.floor(p.hp*0.7))}));
+    toast_(st?.isBoss?"⚠️ 보스 도주 — 재도전 필요.":"도주 성공.");
+    setTimeout(()=>setPhase(battle?.isHurdle?"hurdle_map":"map"),800);
+  }, [battle, blog, slog, toast_]);
+
+  // ── 인게임 선택지 처리 ──
+  const handleChoice = React.useCallback(async (choiceId, optId) => {
+    const choice=inGameChoice;
+    const opt=choice?.opts.find(o=>o.id===optId);
+    if(!opt) return;
+    setInGameChoice(null);  // 즉시 닫기
+    slog(`[선택] ${opt.label}`,"highlight");
+    slog(opt.sub,"narr");
+
+    if(choiceId==="sc1_choice"){
+      const sc2=SC2[optId];
+      setScenario(sc2); setStageIdx(0);
+      slog(`[시나리오 2] ${sc2.name} 시작`,"stage");
+      toast_(`시나리오 2: ${sc2.name}`);
+      setPhase("map");
+    }
+    // 백그라운드 저장
+    (async()=>{
+      try{
+        const cur=(await DB.get(K.choices))||{};
+        if(!cur[choiceId]) cur[choiceId]={};
+        cur[choiceId][optId]=(cur[choiceId][optId]||0)+1;
+        await DB.set(K.choices,cur); setGChoices(cur);
+        await addFeed(`🗳️ [선택] ${opt.label}`);
+        await broadcast(`시나리오 분기 결정: "${opt.label}"`);
+      }catch(_){}
+    })();
+  }, [inGameChoice, slog, toast_, addFeed, broadcast]);
+
+  // ── SC3/4 진입 ──
+  const enterSc = React.useCallback(async (key) => {
+    const sc=await DB.get(key);
+    if(!sc){toast_("아직 생성되지 않았습니다.");return;}
+    setScenario(sc); setStageIdx(0);
+    slog(`[시나리오 ${sc.id}] ${sc.name} 시작`,"stage");
+    setPhase("map");
+  }, [slog, toast_]);
+
+  // ════════════════════════════════════════
+  // RENDER HELPERS
+  // ════════════════════════════════════════
+  const cls=player?CLASSES.find(c=>c.id===player.classId):null;
+  const totalBoss=Object.keys(gProgress).filter(k=>k.endsWith("boss")).reduce((a,k)=>a+gProgress[k],0);
+
+  const Bar=({icon,val,max,color})=>(
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+      <span style={{fontSize:14,minWidth:20}}>{icon}</span>
+      <div style={{flex:1,height:8,background:"#001a0d",borderRadius:4}}>
+        <div style={{height:"100%",borderRadius:4,width:`${Math.max(0,Math.min(100,(val/max)*100))}%`,background:color,boxShadow:`0 0 6px ${color}55`,transition:"width .3s"}}/>
+      </div>
+      <span style={{fontSize:13,color,minWidth:70,textAlign:"right",fontWeight:"bold"}}>{val} / {max}</span>
+    </div>
+  );
+
+  const Mod=({title,children})=>(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.9)",zIndex:60,display:"flex",alignItems:"center",justifyContent:"center",padding:12}}>
+      <div style={{background:"#020d06",border:"1px solid #00ff8828",borderRadius:6,width:"100%",maxWidth:460,maxHeight:"84vh",display:"flex",flexDirection:"column"}}>
+        <div style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",borderBottom:"1px solid #00ff8818"}}>
+          <span style={{fontSize:14,color:"#00ff88"}}>{title}</span>
+          <button onClick={()=>setPanel(null)} style={{background:"none",border:"none",color:"#ff4466",fontSize:20,cursor:"pointer",lineHeight:1}}>✕</button>
+        </div>
+        <div style={{overflowY:"auto",padding:"12px 14px",flex:1}}>{children}</div>
+      </div>
+    </div>
+  );
+
+  const HBtn=({onClick,children,color="#00ff88"})=>(
+    <button onClick={onClick} style={{background:"transparent",border:`1px solid ${color}44`,color,padding:"5px 11px",cursor:"pointer",fontSize:12,borderRadius:3}}
+      onMouseEnter={e=>e.currentTarget.style.background=`${color}11`}
+      onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+      {children}
+    </button>
+  );
+
+  const noHeader=["title","prologue"].includes(phase);
+  const noHud   =["title","prologue","class_select","opening"].includes(phase);
+
+  // ════════════════════════════════════════
+  // JSX
+  // ════════════════════════════════════════
+  return (
+    <div style={{minHeight:"100vh",background:"#020810",fontFamily:"'Courier New',monospace",color:"#00ff88"}}>
+      <div style={{position:"fixed",inset:0,pointerEvents:"none",backgroundImage:"repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,255,136,.007) 2px,rgba(0,255,136,.007) 4px)",zIndex:0}}/>
+      <div style={{position:"relative",zIndex:1,maxWidth:520,margin:"0 auto",padding:"12px 14px"}}>
+
+        {/* Toast */}
+        {toast&&(
+          <div style={{position:"fixed",top:14,left:"50%",transform:"translateX(-50%)",background:"#001a0d",border:"1px solid #00ff88",padding:"10px 18px",borderRadius:4,zIndex:90,fontSize:13,color:"#00ff88",boxShadow:"0 0 24px #00ff8833",maxWidth:"90vw",textAlign:"center"}}>
+            {toast}
+          </div>
+        )}
+
+        {/* Header */}
+        {!noHeader&&(
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid #00ff8818",paddingBottom:10,marginBottom:12}}>
+            <div>
+              <div style={{fontSize:9,color:"#00ff8844",letterSpacing:4}}>RESISTANCE v0.7</div>
+              <div style={{fontSize:16,fontWeight:"bold",letterSpacing:2,textShadow:"0 0 12px #00ff8866"}}>◈ SKYNET WARS ◈</div>
+            </div>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"flex-end"}}>
+              {player&&<HBtn onClick={()=>setPanel("skills")}>🗡️ 스킬</HBtn>}
+              <HBtn onClick={()=>setPanel("story")} color="#99bbff">📖 로그</HBtn>
+              <HBtn onClick={()=>setPanel("feed")}  color="#ffaa44">📡 피드</HBtn>
+              {notifs.length>0&&<HBtn onClick={()=>setPanel("notifs")} color="#ff88dd">📢{notifs.length}</HBtn>}
+            </div>
+          </div>
+        )}
+
+        {/* Skynet msg */}
+        {player&&!noHud&&(
+          <div style={{background:"#0d0008",borderLeft:"3px solid #ff0033",padding:"8px 12px",marginBottom:12,fontSize:13,color:"#ff7788",borderRadius:"0 4px 4px 0"}}>
+            <span style={{color:"#ff0033",fontWeight:"bold"}}>【SKYNET】</span> {skynetMsg}
+          </div>
+        )}
+
+        {/* HUD */}
+        {player&&!noHud&&(
+          <div style={{background:"#000d05",border:"1px solid #00ff8818",padding:"12px 14px",marginBottom:12,borderRadius:4}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+              <span style={{fontSize:15,color:cls?.color||"#00ff88",fontWeight:"bold"}}>{cls?.portrait} {cls?.name}</span>
+              <div>
+                <span style={{fontSize:13,color:"#ffaa00"}}>Lv.{player.level}</span>
+                <span style={{fontSize:13,color:"#ffcc44",marginLeft:10}}>💰 {player.gold}G</span>
+              </div>
+            </div>
+            <Bar icon="❤️" val={player.hp}  max={player.maxHp}  color="#00ff88"/>
+            <Bar icon="💧" val={player.mp}  max={player.maxMp}  color="#4499ff"/>
+            <div style={{display:"flex",gap:12,marginTop:6,fontSize:12,color:"#00ff8866"}}>
+              <span>⚔️ ATK {player.atk}</span><span>🛡️ DEF {player.def}</span>
+              <span>EXP {player.exp}/{player.expNext}</span>
+            </div>
+            {(shBuff||azBuff||taBuff)&&(
+              <div style={{display:"flex",gap:5,marginTop:6}}>
+                {shBuff&&<span style={{fontSize:11,color:"#ffff44",border:"1px solid #ffff4444",padding:"1px 7px",borderRadius:2}}>방어막</span>}
+                {azBuff&&<span style={{fontSize:11,color:"#ff8844",border:"1px solid #ff884444",padding:"1px 7px",borderRadius:2}}>방어무시 대기</span>}
+                {taBuff&&<span style={{fontSize:11,color:"#44ffcc",border:"1px solid #44ffcc44",padding:"1px 7px",borderRadius:2}}>도발중</span>}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ══ TITLE ══ */}
+        {phase==="title"&&(
+          <div style={{textAlign:"center",paddingTop:40}}>
+            <div style={{fontSize:10,color:"#ff003355",letterSpacing:6,marginBottom:14}}>2099 A.D.</div>
+            <div style={{fontSize:30,fontWeight:"bold",color:"#00ff88",textShadow:"0 0 30px #00ff8888",letterSpacing:4,marginBottom:8}}>SKYNET WARS</div>
+            <div style={{fontSize:14,color:"#ff5577",marginBottom:10}}>스카이넷을 공략하라</div>
+            <div style={{fontSize:13,color:"#aabbcc",marginBottom:16,lineHeight:1.9}}>
+              AI가 인류를 보호종으로 분류한 세계.<br/>당신은 방공호에서 태어난 마지막 자유인이다.
+            </div>
+            <div style={{fontSize:12,color:"#ffaa44",marginBottom:8}}>
+              전 서버 보스 격파: {totalBoss}회 | {sc3ready?"SC3 개방 ✅":"SC3 미개방"} {sc4ready?"| SC4 개방 ✅":""}
+            </div>
+            {notifs.slice(-2).length>0&&(
+              <div style={{background:"#001a12",border:"1px solid #00ffdd22",padding:"8px 12px",marginBottom:16,borderRadius:4,textAlign:"left"}}>
+                <div style={{fontSize:11,color:"#00ffdd",marginBottom:4}}>📢 최근 전체 알림</div>
+                {notifs.slice(-2).reverse().map(n=>(
+                  <div key={n.id} style={{fontSize:12,color:"#88ffdd",marginBottom:2}}>{n.time} {n.msg}</div>
+                ))}
+              </div>
+            )}
+            <button onClick={()=>setPhase("prologue")}
+              style={{background:"transparent",border:"1px solid #00ff88",color:"#00ff88",padding:"12px 36px",cursor:"pointer",fontSize:14,letterSpacing:3,borderRadius:4,display:"block",margin:"0 auto 12px"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="#00ff8811";e.currentTarget.style.boxShadow="0 0 20px #00ff8844"}}
+              onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.boxShadow="none"}}>
+              ▶ 게임 시작
+            </button>
+            {(sc3ready||sc4ready)&&(
+              <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
+                {sc3ready&&<HBtn onClick={()=>enterSc(K.sc3)} color="#88ffdd">시나리오 3부터</HBtn>}
+                {sc4ready&&<HBtn onClick={()=>enterSc(K.sc4)} color="#ff88dd">시나리오 4부터</HBtn>}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ══ PROLOGUE ══ */}
+        {phase==="prologue"&&(
+          <div>
+            <div style={{fontSize:10,color:"#ff003355",letterSpacing:3,marginBottom:12}}>▶ SKYNET ARCHIVES / 기밀 해제</div>
+            {PLOG.slice(0,pIdx+1).map((l,i)=>(
+              <div key={i} style={{color:lc(l.t),fontSize:l.t==="highlight"?15:13,marginBottom:l.t==="div"?10:7,lineHeight:1.8,fontWeight:l.t==="highlight"?"bold":"normal",animation:"fadeIn .3s ease"}}>
+                {l.tx}
+              </div>
+            ))}
+            {pIdx<PLOG.length-1&&<div style={{color:"#00ff8844",animation:"blink 1s infinite",marginTop:8}}>▌</div>}
+            <button onClick={skipPrologue} style={{marginTop:18,background:"#00ff8811",border:"1px solid #00ff8844",color:"#00ff88",padding:"9px 24px",cursor:"pointer",fontSize:13,borderRadius:3}}>
+              ▶▶ 스킵
+            </button>
+          </div>
+        )}
+
+        {/* ══ OPENING ══ */}
+        {phase==="opening"&&(
+          <div>
+            <div style={{background:"#0d0a00",borderLeft:"3px solid #ffcc44",padding:"12px 14px",marginBottom:14,borderRadius:"0 4px 4px 0"}}>
+              <div style={{fontSize:13,color:"#ffddaa",lineHeight:1.8}}>
+                방공호 철문이 울렸다. 먼지가 떨어졌다.<br/>당신은 처음으로 무기를 집어 들었다.
+              </div>
+            </div>
+            <div style={{fontSize:16,color:"#ffffff",fontWeight:"bold",marginBottom:6,lineHeight:1.7}}>
+              문 너머에서 목소리가 들린다. 어떻게 반응할 것인가?
+            </div>
+            <div style={{fontSize:13,color:"#ffaa44",marginBottom:14}}>이 선택이 당신의 첫 번째 경로를 결정한다.</div>
+
+            {gChoices.opening&&(()=>{
+              const total=Object.values(gChoices.opening||{}).reduce((a,b)=>a+b,0);
+              if(!total) return null;
+              return(
+                <div style={{background:"#000d05",border:"1px solid #00ff8818",padding:"10px 12px",marginBottom:14,borderRadius:4}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:8,fontSize:12}}>
+                    <span style={{color:"#00ff8866"}}>▶ 전체 유저 선택 현황</span>
+                    <span style={{color:"#ffaa44"}}>총 {total}명</span>
+                  </div>
+                  {OPENING.map(o=>{
+                    const cnt=gChoices.opening?.[o.id]||0;
+                    const pct=total?Math.round(cnt/total*100):0;
+                    const isTop=cnt>0&&cnt===Math.max(...OPENING.map(x=>gChoices.opening?.[x.id]||0));
+                    return(
+                      <div key={o.id} style={{marginBottom:7}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:isTop?"#ffdd44":"#88aacc",marginBottom:2}}>
+                          <span>{o.icon} {o.label} {isTop&&total>0?"🔥":""}</span><span>{cnt}명 ({pct}%)</span>
+                        </div>
+                        <div style={{height:4,background:"#001a0d",borderRadius:2}}>
+                          <div style={{height:"100%",width:`${pct}%`,background:isTop?"#ffdd44":"#00ff8855",borderRadius:2,transition:"width .6s"}}/>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div style={{fontSize:10,color:"#00ff8833",textAlign:"right",marginTop:4}}>↻ 6초마다 자동 갱신</div>
+                </div>
+              );
+            })()}
+
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {OPENING.map(o=>(
+                <button key={o.id} onClick={()=>handleOpening(o.id)}
+                  style={{background:"transparent",border:"1px solid #00ff8830",color:"#00ff88",padding:"14px",textAlign:"left",cursor:"pointer",borderRadius:4,transition:"all .2s"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="#00ff8811"}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <div style={{fontSize:15,fontWeight:"bold",marginBottom:4}}>{o.icon} {o.label}</div>
+                  <div style={{fontSize:13,color:"#bbccdd",marginBottom:3}}>{o.sub}</div>
+                  <div style={{fontSize:12,color:"#ffaa4488"}}>{o.hint}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ══ CLASS SELECT ══ */}
+        {phase==="class_select"&&(
+          <div>
+            <div style={{fontSize:14,color:"#00ff8877",letterSpacing:2,marginBottom:14}}>▶ 생존자 출신 선택</div>
+            {CLASSES.map(c=>(
+              <div key={c.id} onClick={()=>setSelCls(s=>s?.id===c.id?null:c)} style={{background:"transparent",border:`1px solid ${c.color}33`,padding:"14px",borderRadius:4,cursor:"pointer",marginBottom:8,transition:"all .2s"}}
+                onMouseEnter={e=>e.currentTarget.style.border=`1px solid ${c.color}88`}
+                onMouseLeave={e=>e.currentTarget.style.border=`1px solid ${c.color}33`}>
+                <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:6}}>
+                  <span style={{fontSize:24}}>{c.portrait}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:15,fontWeight:"bold",color:c.color}}>{c.name}</div>
+                    <div style={{fontSize:12,color:"#88aacc"}}>{c.bg}</div>
+                  </div>
+                  <div style={{fontSize:11,color:"#00ff8866",textAlign:"right"}}>HP {c.stats.maxHp}<br/>ATK {c.stats.atk}</div>
+                </div>
+                <div style={{fontSize:13,color:"#ffcc44",marginBottom:8}}>🔰 {c.trait}</div>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
+                  {c.skills.map(sk=>(
+                    <span key={sk.id} style={{fontSize:11,color:sk.type==="atk"?"#ff9977":sk.type==="heal"?"#66ffcc":"#77bbff",border:`1px solid ${sk.type==="atk"?"#ff997744":sk.type==="heal"?"#66ffcc44":"#77bbff44"}`,padding:"3px 8px",borderRadius:3}}>
+                      {sk.icon} {sk.name}
+                    </span>
+                  ))}
+                </div>
+                <div style={{fontSize:12,color:"#ffaa66",marginBottom:10}}>
+                  동료: {c.companion.portrait} {c.companion.name} ({c.companion.title})
+                </div>
+                <button onClick={e=>{e.stopPropagation();confirmClass(c);}}
+                  style={{background:`${c.color}22`,border:`1px solid ${c.color}`,color:c.color,padding:"10px 20px",cursor:"pointer",fontSize:13,borderRadius:3,width:"100%",fontWeight:"bold"}}>
+                  이 캐릭터로 시작 →
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ══ CHOICE ══ */}
+        {phase==="choice"&&inGameChoice&&(
+          <div>
+            {comp&&(
+              <div style={{background:"#0d0a00",borderLeft:"3px solid #ffcc44",padding:"12px 14px",marginBottom:14,borderRadius:"0 4px 4px 0"}}>
+                <div style={{fontSize:12,color:"#ffcc44",marginBottom:4}}>{comp.portrait} {comp.name}</div>
+                <div style={{fontSize:13,color:"#ffddaa",lineHeight:1.8}}>중요한 선택이야. 신중하게 골라.</div>
+              </div>
+            )}
+            <div style={{fontSize:16,color:"#ffffff",fontWeight:"bold",marginBottom:8,lineHeight:1.7}}>{inGameChoice.question}</div>
+
+            {gChoices[inGameChoice.id]&&(()=>{
+              const total=Object.values(gChoices[inGameChoice.id]||{}).reduce((a,b)=>a+b,0);
+              if(!total) return null;
+              return(
+                <div style={{background:"#000d05",border:"1px solid #00ff8818",padding:"10px 12px",marginBottom:14,borderRadius:4}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:8,fontSize:12}}>
+                    <span style={{color:"#00ff8866"}}>▶ 전체 유저 선택 현황</span>
+                    <span style={{color:"#ffaa44"}}>총 {total}명</span>
+                  </div>
+                  {inGameChoice.opts.map(o=>{
+                    const cnt=gChoices[inGameChoice.id]?.[o.id]||0;
+                    const pct=total?Math.round(cnt/total*100):0;
+                    const isTop=cnt>0&&cnt===Math.max(...inGameChoice.opts.map(x=>gChoices[inGameChoice.id]?.[x.id]||0));
+                    return(
+                      <div key={o.id} style={{marginBottom:7}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:isTop?"#ffdd44":"#88aacc",marginBottom:2}}>
+                          <span>{o.label} {isTop&&total>0?"🔥":""}</span><span>{cnt}명 ({pct}%)</span>
+                        </div>
+                        <div style={{height:4,background:"#001a0d",borderRadius:2}}>
+                          <div style={{height:"100%",width:`${pct}%`,background:isTop?"#ffdd44":"#00ff8855",borderRadius:2,transition:"width .6s"}}/>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {inGameChoice.opts.map(o=>(
+                <button key={o.id} onClick={()=>handleChoice(inGameChoice.id,o.id)}
+                  style={{background:"transparent",border:"1px solid #00ff8830",color:"#00ff88",padding:"14px",textAlign:"left",cursor:"pointer",borderRadius:4,transition:"all .2s"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="#00ff8811"}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <div style={{fontSize:14,fontWeight:"bold",marginBottom:4}}>{o.label}</div>
+                  <div style={{fontSize:13,color:"#bbccdd"}}>{o.sub}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ══ MAP ══ */}
+        {phase==="map"&&scenario&&(
+          <div>
+            <div style={{fontSize:12,color:"#00ff8855",letterSpacing:2,marginBottom:4}}>▶ {scenario.name}</div>
+            <div style={{fontSize:13,color:"#aabbcc",marginBottom:12}}>{scenario.desc}</div>
+
+            {/* 허들 구간 버튼 */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:11,color:"#44aa6688",letterSpacing:2,marginBottom:6}}>🔄 반복 파밍 구간 (허들)</div>
+              {HURDLES.map(h=>(
+                <button key={h.id} onClick={()=>{setCurHurdle(h);setHWaveIdx(0);setPhase("hurdle_map");}}
+                  style={{width:"100%",background:"#0d1a0a",border:"1px solid #44aa6630",color:"#88cc77",padding:"11px 14px",cursor:"pointer",borderRadius:4,marginBottom:6,textAlign:"left"}}>
+                  <div style={{fontSize:14,fontWeight:"bold",marginBottom:2}}>{h.name}</div>
+                  <div style={{fontSize:12,color:"#66aa55",marginBottom:2}}>{h.desc}</div>
+                  {(hRuns[h.id]||0)>0&&<div style={{fontSize:11,color:"#ffaa44"}}>📈 {hRuns[h.id]}회 완료 | 현재 배율 +{hRuns[h.id]*10}%</div>}
+                </button>
+              ))}
+            </div>
+
+            <div style={{fontSize:11,color:"#00ff8844",letterSpacing:2,marginBottom:8}}>▶ 메인 스테이지</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {scenario.stages.map((s,i)=>{
+                const done=i<stageIdx,cur=i===stageIdx,locked=i>stageIdx;
+                return(
+                  <button key={s.id} onClick={()=>cur&&startStage()} disabled={locked}
+                    style={{background:cur?"#001a0d":"transparent",border:`1px solid ${s.isBoss?"#ff003322":done?"#00ff8818":cur?"#00ff88":"#00ff8815"}`,color:done?"#446644":locked?"#333":"#00ff88",padding:"13px 14px",textAlign:"left",cursor:cur?"pointer":"default",borderRadius:4,opacity:locked?.35:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                      <span style={{fontSize:16}}>{done?"✅":s.isBoss?"👑":cur?"▶":"○"}</span>
+                      <span style={{fontSize:14,fontWeight:"bold",color:s.isBoss?(done?"#886666":cur?"#ff9999":"#ff6688"):undefined}}>{s.name}</span>
+                      {s.isBoss&&!done&&<span style={{marginLeft:"auto",fontSize:11,color:"#ff6688",border:"1px solid #ff668830",padding:"1px 7px",borderRadius:2}}>BOSS</span>}
+                      {cur&&!done&&<span style={{marginLeft:"auto",fontSize:11,color:"#00ff88",border:"1px solid #00ff8830",padding:"1px 7px",borderRadius:2}}>▶ 진행</span>}
+                    </div>
+                    <div style={{fontSize:13,color:"#aabbcc",paddingLeft:26,lineHeight:1.6}}>{s.story.slice(0,60)}...</div>
+                    {cur&&s.isBoss&&<div style={{fontSize:12,color:"#ff9944",paddingLeft:26,marginTop:4}}>⚠️ 보스전 — 패배/도주 시 재도전 필요</div>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ══ HURDLE MAP ══ */}
+        {phase==="hurdle_map"&&curHurdle&&(
+          <div>
+            {/* 허들 맵 헤더 — 백 버튼 명확하게 */}
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,background:"#001a0d",border:"1px solid #00ff8830",padding:"10px 14px",borderRadius:4}}>
+              <button onClick={()=>setPhase("map")}
+                style={{background:"#00ff8822",border:"1px solid #00ff88",color:"#00ff88",padding:"7px 14px",cursor:"pointer",fontSize:13,borderRadius:3,fontWeight:"bold",flexShrink:0}}
+                onMouseEnter={e=>e.currentTarget.style.background="#00ff8844"}
+                onMouseLeave={e=>e.currentTarget.style.background="#00ff8822"}>
+                ← 맵으로
+              </button>
+              <span style={{fontSize:14,color:"#88cc77",fontWeight:"bold",flex:1}}>{curHurdle.name}</span>
+              <span style={{fontSize:12,color:"#ffaa44"}}>{hRuns[curHurdle.id]||0}회 완료</span>
+            </div>
+            <div style={{background:"#0d1a0a",border:"1px solid #44aa6630",padding:"10px 14px",borderRadius:4,marginBottom:12}}>
+              <div style={{fontSize:13,color:"#66aa55",marginBottom:4}}>{curHurdle.desc}</div>
+              {(hRuns[curHurdle.id]||0)>0&&(
+                <div style={{fontSize:12,color:"#ffaa44",marginTop:4}}>
+                  📈 현재 배율 — 적 HP +{(hRuns[curHurdle.id]||0)*5}% / 보상 +{(hRuns[curHurdle.id]||0)*10}%
+                </div>
+              )}
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
+              {curHurdle.waves.map((w,i)=>(
+                <div key={w.id} style={{background:i===hWaveIdx?"#001a0d":"transparent",border:`1px solid ${i===hWaveIdx?"#44aa66":"#44aa6620"}`,padding:"10px 14px",borderRadius:4,opacity:i>hWaveIdx?.4:1}}>
+                  <div style={{fontSize:13,color:i<=hWaveIdx?"#88cc77":"#446644",fontWeight:i===hWaveIdx?"bold":"normal"}}>
+                    {i<hWaveIdx?"✅":i===hWaveIdx?"▶":"○"} {w.name}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button onClick={startHurdleWave}
+              style={{width:"100%",background:"#001a0d",border:"1px solid #44aa66",color:"#88cc77",padding:"14px",cursor:"pointer",fontSize:14,borderRadius:4,fontWeight:"bold"}}>
+              🔄 전투 시작 (웨이브 {hWaveIdx+1}/{curHurdle.waves.length})
+            </button>
+          </div>
+        )}
+
+        {/* ══ STAGE/BATTLE ══ */}
+        {phase==="stage"&&battle&&(
+          <div>
+            {battle.mons.map((m,i)=>{
+              const dead=m.curHp<=0,tgt=battle.tgt===i;
+              return(
+                <div key={m.id} onClick={()=>!dead&&setBattle(b=>({...b,tgt:i}))}
+                  style={{background:tgt?"#1a0008":"#0d0008",border:`1px solid ${dead?"#222":tgt?"#ff0033":m.boss?"#ff440030":"#ff003320"}`,padding:"12px 14px",marginBottom:6,borderRadius:4,cursor:dead?"default":"pointer",opacity:dead?.4:1}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                    <span style={{fontSize:14,color:dead?"#555":m.boss?"#ff4466":"#ff7788",fontWeight:m.boss?"bold":"normal"}}>
+                      {dead?"💀":m.boss?"👑":"🤖"} {m.name}{m.boss?" [BOSS]":""}
+                    </span>
+                    <span style={{fontSize:14,color:"#ff4466",fontWeight:"bold"}}>{m.curHp}/{m.hp}</span>
+                  </div>
+                  <div style={{height:6,background:"#300010",borderRadius:3}}>
+                    <div style={{height:"100%",borderRadius:3,width:`${(m.curHp/m.hp)*100}%`,background:m.curHp/m.hp>.5?"#ff3366":"#ff0011",transition:"width .3s"}}/>
+                  </div>
+                  {!dead&&<div style={{fontSize:12,color:"#55555a",marginTop:4}}>ATK {m.atk} / DEF {m.def}{tgt?"  ◀ 타겟":""}</div>}
+                </div>
+              );
+            })}
+
+            <div ref={logRef} style={{background:"#000d05",border:"1px solid #00ff8815",padding:"8px 10px",height:110,overflowY:"auto",fontSize:13,marginBottom:12,borderRadius:4}}>
+              {battleLog.map(l=><div key={l.id} style={{color:lc(l.t),marginBottom:3,lineHeight:1.6}}>{l.msg}</div>)}
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:8}}>
+              {player?.skills.map(sk=>{
+                const noMp=(player?.mp||0)<sk.mpCost;
+                const tc=sk.type==="atk"?"#ff9977":sk.type==="heal"?"#66ffcc":"#77bbff";
+                return(
+                  <button key={sk.id} onClick={()=>useSkill(sk.id)} disabled={busy||noMp}
+                    style={{background:noMp?"transparent":`${tc}08`,border:`1px solid ${noMp?"#333":tc+"44"}`,color:noMp?"#444":tc,padding:"12px 10px",cursor:noMp?"not-allowed":"pointer",borderRadius:4,textAlign:"left"}}
+                    onMouseEnter={e=>{if(!noMp)e.currentTarget.style.background=`${tc}18`}}
+                    onMouseLeave={e=>e.currentTarget.style.background=noMp?"transparent":`${tc}08`}>
+                    <div style={{fontSize:15,fontWeight:"bold",marginBottom:3}}>{sk.icon} {sk.name}</div>
+                    <div style={{fontSize:12,color:"#4499ff",marginBottom:3}}>💧 MP {sk.mpCost}</div>
+                    <div style={{fontSize:12,color:"#99aacc",lineHeight:1.5}}>{sk.desc}</div>
+                    {sk.dmgMult>0&&player&&<div style={{fontSize:11,color:"#ff9977aa",marginTop:2}}>예상: ~{Math.floor(player.atk*sk.dmgMult)}dmg</div>}
+                  </button>
+                );
+              })}
+            </div>
+
+            <button onClick={flee}
+              style={{width:"100%",background:"transparent",border:"1px solid #ff880030",color:"#ff8844",padding:"10px",cursor:"pointer",fontSize:13,borderRadius:4}}
+              onMouseEnter={e=>e.currentTarget.style.background="#ff880011"}
+              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+              🏃 도주 {battle.st?.isBoss?"(보스전 — HP -30%, 재도전 필요)":"(HP -30%)"}
+            </button>
+            <div style={{fontSize:11,color:"#00ff8833",textAlign:"center",marginTop:5}}>턴 {battle.turn} | 몬스터 클릭 → 타겟 변경</div>
+          </div>
+        )}
+
+        {/* ══ BOSS RESULT ══ */}
+        {phase==="boss_result"&&(
+          <div style={{textAlign:"center",padding:"20px 0"}}>
+            <div style={{fontSize:26,marginBottom:10}}>🏆</div>
+            <div style={{fontSize:18,fontWeight:"bold",color:"#ffff44",marginBottom:8}}>{scenario?.name} 클리어!</div>
+            <div style={{fontSize:13,color:"#ffaa44",marginBottom:14}}>전 서버 보스 격파 총 {totalBoss}회</div>
+            {notifs.slice(-3).length>0&&(
+              <div style={{background:"#001a12",border:"1px solid #00ffdd22",padding:"10px 14px",marginBottom:16,borderRadius:4,textAlign:"left"}}>
+                <div style={{fontSize:12,color:"#00ffdd",fontWeight:"bold",marginBottom:6}}>📢 최근 전체 알림</div>
+                {notifs.slice(-3).reverse().map(n=>(
+                  <div key={n.id} style={{fontSize:13,color:"#88ffdd",marginBottom:4}}>
+                    <span style={{color:"#00ffdd44",marginRight:6}}>{n.time}</span>{n.msg}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              <button onClick={()=>{setStageIdx(0);setPhase("map");}}
+                style={{background:"transparent",border:"1px solid #00ff8840",color:"#00ff88",padding:"12px",cursor:"pointer",fontSize:13,borderRadius:4}}>
+                🔄 이 경로 반복 도전
+              </button>
+              {sc3ready&&(scenario?.id||0)<3&&(
+                <button onClick={()=>enterSc(K.sc3)}
+                  style={{background:"#00ffdd11",border:"1px solid #00ffdd40",color:"#00ffdd",padding:"12px",cursor:"pointer",fontSize:13,borderRadius:4,fontWeight:"bold"}}>
+                  🌍 시나리오 3 진입 (유저 선택으로 생성됨)
+                </button>
+              )}
+              {sc4ready&&(scenario?.id||0)<4&&(
+                <button onClick={()=>enterSc(K.sc4)}
+                  style={{background:"#ff88dd11",border:"1px solid #ff88dd40",color:"#ff88dd",padding:"12px",cursor:"pointer",fontSize:13,borderRadius:4,fontWeight:"bold"}}>
+                  🏁 최종 시나리오 4 진입
+                </button>
+              )}
+              <button onClick={()=>setPhase("title")}
+                style={{background:"transparent",border:"1px solid #333",color:"#666",padding:"10px",cursor:"pointer",fontSize:12,borderRadius:4}}>
+                타이틀로
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ══ PANELS ══ */}
+        {panel==="skills"&&player&&(
+          <Mod title="🗡️ 스킬 & 능력치">
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+              {[["⚔️ ATK",player.atk],["🛡️ DEF",player.def],["❤️ HP",`${player.hp}/${player.maxHp}`],["💧 MP",`${player.mp}/${player.maxMp}`]].map(([k,v])=>(
+                <div key={k} style={{background:"#001a0d",border:"1px solid #00ff8818",padding:"10px",borderRadius:4,textAlign:"center"}}>
+                  <div style={{fontSize:13,color:"#00ff8877"}}>{k}</div>
+                  <div style={{fontSize:20,fontWeight:"bold",color:"#00ff88"}}>{v}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:13,color:"#ffcc44",marginBottom:10}}>🔰 {cls?.trait}</div>
+            {player.skills.map(sk=>{
+              const tc=sk.type==="atk"?"#ff9977":sk.type==="heal"?"#66ffcc":"#77bbff";
+              return(
+                <div key={sk.id} style={{background:"#000d05",border:`1px solid ${tc}30`,padding:"12px 14px",borderRadius:4,marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                    <span style={{fontSize:16,fontWeight:"bold",color:tc}}>{sk.icon} {sk.name}</span>
+                    <span style={{fontSize:12,color:tc,border:`1px solid ${tc}40`,padding:"1px 8px",borderRadius:2}}>{sk.type==="atk"?"공격":sk.type==="heal"?"회복":"보조"}</span>
+                  </div>
+                  <div style={{fontSize:13,color:"#4499ff",marginBottom:3}}>💧 MP 소모: {sk.mpCost}</div>
+                  {sk.dmgMult>0&&<div style={{fontSize:13,color:"#ff9977",marginBottom:3}}>⚔️ 배율: {sk.dmgMult}x → 예상 {Math.floor(player.atk*sk.dmgMult)}dmg</div>}
+                  <div style={{fontSize:13,color:"#bbccdd",lineHeight:1.6}}>{sk.desc}</div>
+                </div>
+              );
+            })}
+          </Mod>
+        )}
+        {panel==="story"&&(
+          <Mod title="📖 스토리 로그">
+            {storyLog.length===0?<div style={{color:"#444",fontSize:13}}>아직 기록 없음.</div>
+              :[...storyLog].reverse().map(e=>(
+                <div key={e.id} style={{marginBottom:8,borderBottom:"1px solid #00ff8810",paddingBottom:8}}>
+                  <span style={{fontSize:10,color:"#00ff8844",marginRight:8}}>{e.time}</span>
+                  <span style={{fontSize:13,color:lc(e.t),lineHeight:1.8}}>{e.msg}</span>
+                </div>
+              ))}
+          </Mod>
+        )}
+        {panel==="feed"&&(
+          <Mod title="📡 실시간 피드">
+            {feed.length===0?<div style={{color:"#444",fontSize:13}}>피드 없음.</div>
+              :[...feed].reverse().map((f,i)=>(
+                <div key={i} style={{fontSize:12,color:"#88bbaa",marginBottom:6,display:"flex",gap:8,borderBottom:"1px solid #00ff8810",paddingBottom:5}}>
+                  <span style={{color:"#00ff8844",flexShrink:0}}>{f.time}</span><span>{f.msg}</span>
+                </div>
+              ))}
+          </Mod>
+        )}
+        {panel==="notifs"&&(
+          <Mod title="📢 전체 유저 알림">
+            {notifs.length===0?<div style={{color:"#444",fontSize:13}}>알림 없음.</div>
+              :[...notifs].reverse().map(n=>(
+                <div key={n.id} style={{fontSize:13,color:"#88ffdd",marginBottom:8,borderBottom:"1px solid #00ffdd15",paddingBottom:8}}>
+                  <span style={{color:"#00ffdd44",marginRight:8,fontSize:11}}>{n.time}</span>{n.msg}
+                </div>
+              ))}
+          </Mod>
+        )}
+
+        <style>{`
+          @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+          @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+          ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:#001}::-webkit-scrollbar-thumb{background:#00ff8822}
+        `}</style>
+      </div>
+    </div>
+  );
+}
+
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(SkynetRPG));
+  </script>
+</body>
+</html>
