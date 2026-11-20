@@ -1,11 +1,12 @@
 """실시간 호가 위험 모니터 — 과거 데이터로는 볼 수 없는 '호가창' 신호를 실시간으로 감지한다.
 
 감지 항목
-  - 스프레드 확대    : 스프레드가 최근 10분 중앙값의 3배 이상 → 마켓메이커 봇이 호가를 뺌(급변 전조)
+  - 스프레드 확대    : 스프레드가 최근 10분 중앙값의 3배 이상(최소 5bp)이 3초 이상 지속 → 마켓메이커 봇이 호가를 뺌(급변 전조)
   - 유동성 이탈      : 15호가 누적 금액이 최근 10분 중앙값의 40% 미만으로 감소
   - 호가 불균형      : (매수잔량 − 매도잔량)/합계 가 ±0.7 이상
-  - 대형벽 / 스푸핑 의심 : 평소 호가의 10배 이상 큰 주문(벽)이 생겼다가,
-                        그 가격에 체결되지 않았는데 60초 안에 사라지면 '스푸핑 의심'
+  - 대형벽 / 스푸핑 의심 : 평소 호가의 20배 이상(기본 1억원+) 큰 주문(벽)이 생겼다가,
+                        중간가 10bp 이내에서 체결 없이 2~60초 만에 사라지면 '스푸핑 의심'
+                        (같은 크기 벽이 다른 가격에 바로 다시 생기면 마켓메이커 호가이동으로 분류)
                         → 30초 뒤 가격이 벽 반대방향으로 갔는지 기록
   - 거래소 공식 경고 : 업비트 유의/주의 플래그(가격급등락, 거래량급등, 입금급등, 글로벌 시세차, 소수계정 집중)
 
@@ -37,8 +38,11 @@ def now_kst():
 
 
 class Monitor:
-    def __init__(self, market, record=False):
+    def __init__(self, market, record=False, wall_krw=1e8):
         self.market = market
+        self.wall_krw = wall_krw
+        self.hot = {}                      # 지속 조건 카운터
+        self.recent_gone = {}
         self.spreads = deque(maxlen=600)   # 1초 1개 샘플, 10분
         self.depths = deque(maxlen=600)
         self.level_sizes = deque(maxlen=600)
@@ -52,6 +56,13 @@ class Monitor:
         self.lo_since_wall = {}
         self.rec = gzip.open(f"data/live_{market}_{datetime.now(KST):%Y%m%d_%H%M%S}.jsonl.gz", "wt") if record else None
         self.events = None
+
+    def sustained(self, key, cond, t, need=3.0):
+        if not cond:
+            self.hot.pop(key, None)
+            return False
+        self.hot.setdefault(key, t)
+        return t - self.hot[key] >= need
 
     def alert(self, kind, msg, cooldown=60):
         t = time.time()
@@ -88,25 +99,30 @@ class Monitor:
         if len(self.spreads) >= 60:
             med_sp = statistics.median(self.spreads)
             med_dp = statistics.median(self.depths)
-            if spread_bp > max(3 * med_sp, 2.0):
-                self.alert("스프레드 확대", f"{spread_bp:.1f}bp (평소 {med_sp:.1f}bp) → 마켓메이커 이탈, 급변 주의")
-            if depth < 0.4 * med_dp:
-                self.alert("유동성 이탈", f"15호가 {depth / 1e8:.2f}억 (평소 {med_dp / 1e8:.2f}억)")
-            if abs(imb) >= 0.7:
+            if self.sustained("spread", spread_bp > max(3 * med_sp, 5.0), t):
+                self.alert("스프레드 확대", f"{spread_bp:.1f}bp (평소 {med_sp:.1f}bp) 3초+ 지속 → 마켓메이커 이탈, 급변 주의")
+            if self.sustained("depth", depth < 0.4 * med_dp, t):
+                self.alert("유동성 이탈", f"15호가 {depth / 1e8:.2f}억 (평소 {med_dp / 1e8:.2f}억) 3초+ 지속")
+            imb_hot = self.sustained("imb", abs(imb) >= 0.7, t, need=5.0)
+            if imb_hot:
                 self.alert("호가 불균형", f"{imb:+.2f} ({'매수' if imb > 0 else '매도'}잔량 쏠림)", cooldown=120)
 
             # 대형벽 추적
+            if len(self.recent_gone) > 50:
+                self.recent_gone.clear()
             med_lv = statistics.median(self.level_sizes)
             present = {}
             for u in units:
                 for side in ("bid", "ask"):
                     px, sz = u[f"{side}_price"], u[f"{side}_size"]
                     krw = px * sz
-                    if krw >= 10 * med_lv and krw >= 50_000_000:
+                    if krw >= 20 * med_lv and krw >= self.wall_krw:
                         present[(side, px)] = krw
             for key, krw in present.items():
                 if key not in self.walls:
                     self.walls[key] = {"krw": krw, "since": t, "traded": False}
+                    if any(k[0] == key[0] and abs(v / krw - 1) < 0.03 for k, v in self.recent_gone.items()):
+                        continue  # 방금 사라진 벽과 같은 크기 → 호가 이동일 뿐
                     self.alert("대형벽 등장", f"{'매수' if key[0] == 'bid' else '매도'}벽 {key[1]:,.0f}원에 "
                                           f"{krw / 1e8:.2f}억 (평소 호가의 {krw / med_lv:.0f}배)", cooldown=20)
             # 사라진 벽 판정: 가격 범위 안인데 안 보이면 취소된 것
@@ -116,10 +132,16 @@ class Monitor:
                 if key in present:
                     continue
                 w = self.walls.pop(key)
+                self.recent_gone[key] = w["krw"]
                 side, px = key
                 in_range = lo_px <= px <= hi_px
                 age = t - w["since"]
-                if in_range and not w["traded"] and age <= 60:
+                near = abs(px / self.mid - 1) * 1e4 <= 10
+                moved = any(k[0] == side and abs(v / w["krw"] - 1) < 0.03 for k, v in present.items())
+                if moved:
+                    self.counts["MM봇 호가이동"] = self.counts.get("MM봇 호가이동", 0) + 1
+                    continue
+                if in_range and near and not w["traded"] and 2 <= age <= 60:
                     self.alert("스푸핑 의심", f"{'매수' if side == 'bid' else '매도'}벽 {px:,.0f}원 "
                                           f"{w['krw'] / 1e8:.2f}억이 체결 없이 {age:.0f}초 만에 취소", cooldown=0)
                     self.pending_spoof.append({"t": t, "side": side, "mid": self.mid})
@@ -207,10 +229,11 @@ def main():
     ap.add_argument("--market", default="KRW-BTC")
     ap.add_argument("--minutes", type=float)
     ap.add_argument("--record", action="store_true")
+    ap.add_argument("--wall-krw", type=float, default=1e8, help="대형벽 최소 금액(원)")
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
     try:
-        asyncio.run(Monitor(args.market, args.record).run(args.minutes))
+        asyncio.run(Monitor(args.market, args.record, args.wall_krw).run(args.minutes))
     except KeyboardInterrupt:
         pass
 
