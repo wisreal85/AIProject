@@ -38,6 +38,7 @@ def run(ticks, p: Params, half_spread: float, fee_rate: float):
     e.force_close(last_ts, last_price * (1 - half_spread))
     hours = (ticks[-1][0] - ticks[0][0]) / 3.6e6
     out = summarize(e.trades, p, hours)
+    out["blocked"] = e.blocked
     out["halts"] = sum(1 for v in e.daily_pnl.values() if v <= -p.max_daily_loss_krw)
     return out
 
@@ -55,6 +56,7 @@ def main():
     ap.add_argument("--grid", action="store_true")
     ap.add_argument("--no-flow-exit", action="store_true", help="흐름전환 청산 끄기(익절/손절만)")
     ap.add_argument("--max-daily-loss", type=float)
+    ap.add_argument("--risk-filter", action="store_true", help="고변동성·정각 구간 진입 금지")
     args = ap.parse_args()
 
     api = UpbitPublic()
@@ -93,10 +95,14 @@ def main():
         p.exit_on_flow = False
     if args.max_daily_loss is not None:
         p.max_daily_loss_krw = args.max_daily_loss
+    if args.risk_filter:
+        p.vol_filter = p.avoid_minute_open = True
 
     if not args.grid:
         res = run(ticks, p, half, fee)
         print_summary(res, f"{args.market} 백테스트 (수수료 {args.fee_pct}%)")
+        if res["blocked"]:
+            print("위험 필터가 막은 진입: " + ", ".join(f"{k} {v}회" for k, v in res["blocked"].items()))
         zero = run(ticks, p, 0.0, 0.0)
         print(f"\n[비교] 수수료·스프레드 0 이었다면 순손익: {zero['net_pnl']:+,.1f}원 "
               f"→ 비용이 결과를 얼마나 바꾸는지 보세요")

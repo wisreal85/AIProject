@@ -41,6 +41,10 @@ class Params:
     max_daily_loss_krw: float = 2_000  # 하루 누적 손실 한도
     resume_next_day: bool = True       # False 면 한도 도달 시 완전 정지
     exit_on_flow: bool = True          # 흐름 꺾이면 즉시 청산할지
+    # --- 위험 신호 필터 (bot_footprint.py 분석 결과) ---
+    vol_filter: bool = False           # 최근 60초 변동폭이 최근 30분 중 상위 10%면 진입 금지 (위험확률 3.3배)
+    vol_filter_pct: float = 90
+    avoid_minute_open: bool = False    # 매분 58~02초(적립식 봇 몰림, 직후 되돌림) 진입 금지
 
 
 class FlowStrategy:
@@ -53,6 +57,11 @@ class FlowStrategy:
         self.ema_slow: float | None = None
         self.last_ts: int | None = None
         self.first_ts: int | None = None
+        self.prices: deque[tuple[int, float]] = deque()   # 최근 60초 (ts, price)
+        self.vol_hist: deque[float] = deque(maxlen=1800)  # 초당 1개, 최근 30분의 60초 변동폭
+        self._last_sec = None
+        self._vol_thr = None
+        self._thr_age = 0
 
     def on_trade(self, ts: int, price: float, volume: float, is_buy: bool) -> None:
         krw = price * volume
@@ -66,6 +75,15 @@ class FlowStrategy:
             self.total_krw -= abs(v)
             if v > 0:
                 self.buy_krw -= v
+
+        self.prices.append((ts, price))
+        while self.prices[0][0] < ts - 60_000:
+            self.prices.popleft()
+        sec = ts // 1000
+        if sec != self._last_sec:
+            self._last_sec = sec
+            self.vol_hist.append(self.range_bp())
+            self._thr_age += 1
 
         if self.ema_fast is None:
             self.ema_fast = self.ema_slow = price
@@ -100,6 +118,23 @@ class FlowStrategy:
             and self.flow >= self.p.entry_flow
             and self.uptrend
         )
+
+    def range_bp(self) -> float:
+        ps = [p for _, p in self.prices]
+        return (max(ps) - min(ps)) / ps[-1] * 1e4 if ps else 0.0
+
+    def risk_reason(self, ts: int) -> str | None:
+        """진입을 막아야 할 위험 신호가 있으면 사유를 돌려준다"""
+        if self.p.avoid_minute_open and (ts // 1000) % 60 in (58, 59, 0, 1, 2):
+            return "정각 적립봇 구간"
+        if self.p.vol_filter and len(self.vol_hist) >= 300:
+            if self._vol_thr is None or self._thr_age >= 30:
+                hist = sorted(self.vol_hist)
+                self._vol_thr = hist[int(len(hist) * self.p.vol_filter_pct / 100) - 1]
+                self._thr_age = 0
+            if self.range_bp() > self._vol_thr:
+                return "고변동성"
+        return None
 
     def flow_broken(self) -> bool:
         return self.flow <= self.p.exit_flow or not self.uptrend
@@ -153,6 +188,7 @@ class Engine:
         self.stopped = False
         self.daily_pnl: dict[int, float] = {}
         self.on_trade_closed = None  # 콜백(선택)
+        self.blocked: dict[str, int] = {}  # 위험 필터로 막은 진입 횟수
 
     @staticmethod
     def kst_day(ts: int) -> int:
@@ -216,6 +252,10 @@ class Engine:
             if (ask - bid) / mid * 100 > self.p.max_spread_pct:
                 return
             if self.s.entry_signal():
+                why = self.s.risk_reason(ts)
+                if why:
+                    self.blocked[why] = self.blocked.get(why, 0) + 1
+                    return
                 self.pending = ("buy", ts + int(self.p.latency_ms), "entry")
         else:
             pnl = self.net_pnl_pct(bid)

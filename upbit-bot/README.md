@@ -36,6 +36,19 @@ python paper.py --market KRW-BTC --minutes 60 --order-krw 10000 --max-daily-loss
 - 일일 손실 한도에 닿으면 알림을 띄우고 거래를 멈춥니다.
   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 환경변수를 넣으면 텔레그램으로도 알림을 보냅니다.
 
+## 4. 다른 봇의 흔적 분석 + 위험 신호 검증
+```bash
+python bot_footprint.py --file data/ticks_KRW-BTC_72h.csv
+python backtest.py --hours 72 --risk-filter   # 위험 신호 구간 진입 금지 적용
+```
+| 분석 | 무엇을 보나 |
+|---|---|
+| 주문 크기 지문 | 같은 수량·딱 떨어지는 원화금액 반복 → 고정금액 봇, 분할매매 봇 |
+| 시간 지문 | 매분 0초 등 특정 시각 몰림 → 적립식/스케줄 봇 |
+| 스윕·버스트 | 여러 호가를 한 번에 쓸어가는 주문, 체결 폭주 → 그 뒤 가격이 이어지나 되돌리나 |
+| 흐름 과열 이후 | 매수세가 강할 때 들어가면 실제로 수수료(10bp) 이상 오르나 |
+| 위험 신호 Lift | 각 신호가 '향후 60초 급변동' 확률을 평소의 몇 배로 올리나 |
+
 ## 전략 규칙 (`strategy.py` 의 `Params`)
 | 항목 | 기본값 | 의미 |
 |---|---|---|
@@ -48,6 +61,8 @@ python paper.py --market KRW-BTC --minutes 60 --order-krw 10000 --max-daily-loss
 | max_spread_pct | 0.10 | 스프레드가 넓으면 진입 안 함 |
 | max_daily_loss_krw | 2000 | 하루(KST) 손실 한도 → 알림 후 중단 |
 | order_krw | 10000 | 1회 매수 금액 |
+| vol_filter | False | 최근 60초 변동폭이 최근 30분 중 상위 10%면 진입 금지 |
+| avoid_minute_open | False | 매분 58~02초(적립식 봇 몰림) 진입 금지 |
 
 ## API 호출 제한 대응 (`upbit_api.py`)
 - 초당 8회 토큰 버킷 (업비트 시세 API 제한은 그룹별 초당 10회)
