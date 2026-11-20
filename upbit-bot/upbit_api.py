@@ -104,6 +104,13 @@ class UpbitPublic:
             params["days_ago"] = days_ago
         return self._get("/v1/trades/ticks", params)
 
+    def candles(self, market: str, unit: int = 5, count: int = 200, to: str | None = None):
+        """분봉. unit: 1,3,5,10,15,30,60,240. to: 'YYYY-MM-DDTHH:MM:SSZ'(UTC) 이전 캔들"""
+        params = {"market": market, "count": count}
+        if to:
+            params["to"] = to
+        return self._get(f"/v1/candles/minutes/{unit}", params)
+
 
 def spread_pct(orderbook: dict) -> tuple[float, float, float]:
     """(best_bid, best_ask, 스프레드%) 반환"""

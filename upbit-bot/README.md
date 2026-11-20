@@ -49,6 +49,25 @@ python backtest.py --hours 72 --risk-filter   # 위험 신호 구간 진입 금�
 | 흐름 과열 이후 | 매수세가 강할 때 들어가면 실제로 수수료(10bp) 이상 오르나 |
 | 위험 신호 Lift | 각 신호가 '향후 60초 급변동' 확률을 평소의 몇 배로 올리나 |
 
+## 5. 저빈도(스윙) 전략 – 5분봉 1년, walk-forward
+```bash
+python swing_backtest.py --market KRW-BTC --days 365
+```
+돌파 / 평균회귀 / 추세 3계열 270개 설정. 매달 '직전 2개월 최고 설정'을 다음 달에 적용해 실전에 가깝게 검증합니다.
+
+## 6. 봇 따라타기 검증
+```bash
+python ride_bots.py --file data/ticks_KRW-BTC_72h.csv
+```
+정각 적립봇 선행매수 / 분할매매 봇 따라타기 / 대형 스윕 따라타기 / 급등락 역추세 — 보유기간별 평균수익을 왕복비용(12bp)과 비교.
+
+## 7. 실시간 호가 위험 모니터
+```bash
+python risk_monitor.py --market KRW-BTC --minutes 30 --record
+```
+스프레드 확대, 유동성 이탈, 호가 불균형, 대형벽 등장·스푸핑 의심(체결 없이 취소된 벽), 업비트 공식 유의/주의 플래그.
+`--record` 로 호가·체결을 저장해 두면 나중에 호가 기반 백테스트가 가능합니다.
+
 ## 전략 규칙 (`strategy.py` 의 `Params`)
 | 항목 | 기본값 | 의미 |
 |---|---|---|
